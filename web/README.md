@@ -19,6 +19,7 @@ component.
 | `__tailnet/page.js` | added to every tailnet page by the worker; routes `WebSocket` and `document.cookie` through the client. |
 | `node/main.wasm`, `node/wasm_exec.js` | the built client and Go's loader. |
 | `tsconnect.patch` | our changes to Tailscale's `cmd/tsconnect/wasm`. |
+| `make-patch.sh` | rewrites `tsconnect.patch` from the changes in the Tailscale checkout. |
 | `build.sh` | rebuilds `node/` from a patched Tailscale checkout. |
 | `compatibility/index.html` | the supported browsers and devices page. |
 | `test/client.html` | starts the client in the current browser and asks Tailscale for a sign-in address, without signing in. |
@@ -56,6 +57,8 @@ Open `/test/mock.html` to run the tests.
 - `cookies_js.go`: the in-memory cookie jar shared by requests and sockets,
   split so HttpOnly cookies stay hidden from pages; `ipn.cookies(url)` and
   `ipn.setCookie(url, line)` back `document.cookie`.
+- `wasm_js.go`: one added setting, `ephemeral: false`, which registers a
+  normal device for the "Stay signed in" option. The default stays ephemeral.
 - `websocket_js.go`: `ipn.websocket({url, protocols, headers, on...})`,
   a WebSocket client over the tailnet that shares the cookie jar.
 

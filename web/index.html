@@ -235,14 +235,15 @@
 
     <div class="facts">
       <div><h3>No server in the middle</h3><p>Pages travel encrypted from your devices to the tab. Porthole has no server that could read or store them.</p></div>
-      <div><h3>Keys stay in the tab</h3><p>The tab's device keys are kept for the browser session only. Close the tab and they are gone.</p></div>
+      <div><h3>Keys stay in the tab</h3><p>Unless you choose to stay signed in, the tab's device keys are kept for the browser session only. Close the tab and they are gone.</p></div>
       <div><h3>A temporary device</h3><p>The tab registers as an ephemeral device, the kind Tailscale removes by itself after it goes offline.</p></div>
+      <div><h3>Staying signed in is your choice</h3><p>Tick "Stay signed in on this browser" and the keys, along with site logins that are meant to last, are stored in that browser until you disconnect. The browser then shows up as a lasting device, which you can remove in the Tailscale admin console.</p></div>
       <div><h3>Your access rules apply</h3><p>The tab can reach what your account is allowed to reach on your tailnet, and nothing more.</p></div>
       <div><h3>Sites are kept apart</h3><p>Each site you open gets its own address, so one site can't read another's cookies or data.</p></div>
       <div><h3>What Tailscale sees</h3><p>The same as for any device: the built-in client talks to Tailscale's coordination servers and sends its usual diagnostic logs.</p></div>
     </div>
 
-    <p class="caution">Use Porthole on computers you trust. While the tab is open it has live access to your tailnet, and anything you type passes through that computer, so disconnect when you finish on a shared machine.</p>
+    <p class="caution">Use Porthole on computers you trust. While the tab is open it has live access to your tailnet, and anything you type passes through that computer, so disconnect when you finish on a shared machine, and leave "Stay signed in" off there.</p>
   </div>
 </section>
 
@@ -275,7 +276,11 @@
       </details>
       <details>
         <summary>What happens when I close the tab?</summary>
-        <p>The connection ends and the tab's keys are discarded. You'll also be signed out of any tailnet sites you logged in to through Porthole, because those sessions live in the tab.</p>
+        <p>The connection ends. Normally the tab's keys are discarded too, and you sign in again next time. If you ticked "Stay signed in on this browser", the keys stay in that browser and the next tab connects without asking. Your logins to the tailnet sites themselves follow the same rule: with "Stay signed in" on, a site that offers "remember me" will remember you in the next tab, and otherwise those logins end with the tab.</p>
+      </details>
+      <details>
+        <summary>Can I have two Porthole tabs open?</summary>
+        <p>One tab browses at a time. Opening Porthole in a second tab pauses the first, which offers a button to take over again.</p>
       </details>
       <details>
         <summary>Can I bookmark a page on my tailnet?</summary>

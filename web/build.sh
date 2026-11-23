@@ -46,7 +46,7 @@ TAGS="$(go run "./$TMP")"
 if [ "${RUN_TESTS:-}" != "" ]; then
   GOOS=js GOARCH=wasm go test -tags "$TAGS" \
     -exec "$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
-    -run 'TestDoRequest|TestOpenWebSocket|TestSplitJar' -v ./cmd/tsconnect/wasm
+    -run 'TestDoRequest|TestOpenWebSocket|TestSplitJar|TestCookieExportImport' -v ./cmd/tsconnect/wasm
 fi
 
 mkdir -p "$HERE/node"

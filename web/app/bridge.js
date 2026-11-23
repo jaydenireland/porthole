@@ -27,9 +27,10 @@ export async function removeAppWorker() {
 // websocket:   ({url, protocols, headers, onOpen, onMessage, onClose, onError}) => {send, close}
 // cookies:     { get(url) => string, set(url, text) }: what document.cookie reads and writes
 // onNavigated: (tailnetUrl) => void, after a page navigation got a final response
+// onCookiesChanged: () => void, after a response or a page script changed a cookie
 // onError:     (message) => void
 // onSuperseded: () => void, when Porthole is opened in another tab and this one stops
-export function createBridge({ frame, request, websocket, cookies, onNavigated, onError, onSuperseded }) {
+export function createBridge({ frame, request, websocket, cookies, onNavigated, onCookiesChanged, onError, onSuperseded }) {
   const relays = new Map();  // site origin -> { el, upstreamOrigin, pages, ready, resolve, reject }
 
   // Only one tab browses at a time. A site's service worker is shared by
@@ -132,6 +133,7 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
 
   // Tell a site's open pages to re-read their cookies.
   function cookiesChanged(relay, except) {
+    onCookiesChanged?.();
     for (const page of relay.pages) if (page !== except) page.postMessage({ t: "changed" });
   }
 

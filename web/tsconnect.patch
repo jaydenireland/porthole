@@ -1,9 +1,9 @@
 diff --git a/cmd/tsconnect/wasm/cookies_js.go b/cmd/tsconnect/wasm/cookies_js.go
 new file mode 100644
-index 0000000..6830020
+index 0000000..2e9ed9f
 --- /dev/null
 +++ b/cmd/tsconnect/wasm/cookies_js.go
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,218 @@
 +// Cookie handling for request() and websocket().
 +//
 +// The service worker cannot set cookies on the responses it builds, so the
@@ -15,11 +15,15 @@ index 0000000..6830020
 +package main
 +
 +import (
++	"encoding/json"
 +	"net/http"
 +	"net/http/cookiejar"
 +	"net/url"
++	"sort"
 +	"strings"
++	"sync"
 +	"syscall/js"
++	"time"
 +
 +	"golang.org/x/net/publicsuffix"
 +)
@@ -27,13 +31,108 @@ index 0000000..6830020
 +type splitJar struct {
 +	httpOnly *cookiejar.Jar
 +	script   *cookiejar.Jar
++
++	// records mirrors what is in the two jars, because cookiejar.Jar cannot
++	// list its contents. It is what exportCookies saves.
++	mu      sync.Mutex
++	records map[string]cookieRecord
++}
++
++// cookieRecord is one stored cookie in a form that can be saved and replayed.
++type cookieRecord struct {
++	URL     string `json:"url"`     // the page it was set from, without the query
++	Line    string `json:"line"`    // as a Set-Cookie line, with an absolute Expires
++	Session bool   `json:"session"` // no expiry: lasts for the browser session
++	Expires int64  `json:"expires"` // Unix seconds; 0 for a session cookie
++}
++
++// record notes a cookie the jars were just given, or forgets one that was
++// just deleted.
++func (j *splitJar) record(u *url.URL, c *http.Cookie) {
++	domain := "host:" + u.Hostname()
++	if c.Domain != "" {
++		domain = strings.ToLower(strings.TrimPrefix(c.Domain, "."))
++	}
++	path := c.Path
++	if path == "" {
++		path = "default:" + u.Path
++	}
++	key := domain + "|" + path + "|" + c.Name
++
++	now := time.Now()
++	saved := *c
++	j.mu.Lock()
++	defer j.mu.Unlock()
++	if saved.MaxAge < 0 || (saved.MaxAge == 0 && !saved.Expires.IsZero() && !saved.Expires.After(now)) {
++		delete(j.records, key)
++		return
++	}
++	// Max-Age counts from now; keep it as a fixed time so replaying the
++	// record later does not extend the cookie's life.
++	if saved.MaxAge > 0 {
++		saved.Expires = now.Add(time.Duration(saved.MaxAge) * time.Second)
++		saved.MaxAge = 0
++	}
++	rec := cookieRecord{URL: u.Scheme + "://" + u.Host + u.Path, Line: saved.String(), Session: saved.Expires.IsZero()}
++	if rec.Line == "" {
++		return
++	}
++	if !rec.Session {
++		rec.Expires = saved.Expires.Unix()
++	}
++	j.records[key] = rec
++}
++
++// exportCookies returns every unexpired cookie as JSON.
++func (j *splitJar) exportCookies() string {
++	now := time.Now().Unix()
++	j.mu.Lock()
++	keys := make([]string, 0, len(j.records))
++	for k, rec := range j.records {
++		if !rec.Session && rec.Expires <= now {
++			delete(j.records, k)
++			continue
++		}
++		keys = append(keys, k)
++	}
++	sort.Strings(keys)
++	out := make([]cookieRecord, 0, len(keys))
++	for _, k := range keys {
++		out = append(out, j.records[k])
++	}
++	j.mu.Unlock()
++	b, _ := json.Marshal(out)
++	return string(b)
++}
++
++// importCookies puts cookies saved by exportCookies back into the jars.
++func (j *splitJar) importCookies(data string) {
++	var recs []cookieRecord
++	if json.Unmarshal([]byte(data), &recs) != nil {
++		return
++	}
++	now := time.Now().Unix()
++	for _, rec := range recs {
++		if !rec.Session && rec.Expires <= now {
++			continue
++		}
++		u, err := url.Parse(rec.URL)
++		if err != nil {
++			continue
++		}
++		c, err := http.ParseSetCookie(rec.Line)
++		if err != nil {
++			continue
++		}
++		j.SetCookies(u, []*http.Cookie{c})
++	}
 +}
 +
 +func newSplitJar() *splitJar {
 +	opts := &cookiejar.Options{PublicSuffixList: publicsuffix.List}
 +	h, _ := cookiejar.New(opts)
 +	s, _ := cookiejar.New(opts)
-+	return &splitJar{httpOnly: h, script: s}
++	return &splitJar{httpOnly: h, script: s, records: map[string]cookieRecord{}}
 +}
 +
 +// expired returns a cookie that deletes c from a jar.
@@ -46,6 +145,7 @@ index 0000000..6830020
 +// flag changed.
 +func (j *splitJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 +	for _, c := range cookies {
++		j.record(u, c)
 +		if c.HttpOnly {
 +			j.httpOnly.SetCookies(u, []*http.Cookie{c})
 +			j.script.SetCookies(u, []*http.Cookie{expired(c)})
@@ -87,6 +187,7 @@ index 0000000..6830020
 +			return
 +		}
 +	}
++	j.record(u, c)
 +	j.script.SetCookies(u, []*http.Cookie{c})
 +}
 +
@@ -108,18 +209,33 @@ index 0000000..6830020
 +	}
 +	return js.Undefined()
 +}
++
++// exportCookies() returns the stored cookies as JSON, for the page to save.
++func (i *jsIPN) exportCookies() any {
++	i.httpClient()
++	return requestJar.exportCookies()
++}
++
++// importCookies(json) restores cookies saved by exportCookies().
++func (i *jsIPN) importCookies(data string) any {
++	i.httpClient()
++	requestJar.importCookies(data)
++	return js.Undefined()
++}
 diff --git a/cmd/tsconnect/wasm/cookies_js_test.go b/cmd/tsconnect/wasm/cookies_js_test.go
 new file mode 100644
-index 0000000..b4080b4
+index 0000000..b1c8795
 --- /dev/null
 +++ b/cmd/tsconnect/wasm/cookies_js_test.go
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,113 @@
 +package main
 +
 +import (
 +	"net/http"
 +	"net/url"
++	"strings"
 +	"testing"
++	"time"
 +)
 +
 +func TestSplitJar(t *testing.T) {
@@ -169,6 +285,61 @@ index 0000000..b4080b4
 +	// ts.net is a public suffix, so one tailnet cannot set cookies for all.
 +	j.SetCookies(u, []*http.Cookie{{Name: "wide", Value: "1", Domain: "ts.net", Path: "/"}})
 +	check("public-suffix cookie rejected", j.scriptCookies(u), "")
++}
++
++func TestCookieExportImport(t *testing.T) {
++	j := newSplitJar()
++	u, _ := url.Parse("http://app.tail1234.ts.net/dash?q=1")
++	sent := func(j *splitJar) string {
++		s := ""
++		for _, c := range j.Cookies(u) {
++			s += c.Name + "=" + c.Value + ";"
++		}
++		return s
++	}
++	j.SetCookies(u, []*http.Cookie{
++		{Name: "remember", Value: "long", Path: "/", HttpOnly: true, MaxAge: 3600},
++		{Name: "sess", Value: "tab", Path: "/", HttpOnly: true},
++		{Name: "gone", Value: "x", Path: "/", Expires: time.Now().Add(-time.Hour)},
++		{Name: "soon", Value: "y", Path: "/", MaxAge: 1},
++	})
++	j.setFromScript(u, "theme=dark; Path=/; Max-Age=3600")
++	j.setFromScript(u, "tmp=1; Path=/")
++	j.setFromScript(u, "tmp=; Path=/; Max-Age=0")
++
++	data := j.exportCookies()
++	for _, want := range []string{`remember=long`, `sess=tab`, `theme=dark`, `"session":true`} {
++		if !strings.Contains(data, want) {
++			t.Errorf("export lacks %q: %s", want, data)
++		}
++	}
++	for _, not := range []string{"gone=", "tmp=", "Max-Age", "q=1"} {
++		if strings.Contains(data, not) {
++			t.Errorf("export should not contain %q: %s", not, data)
++		}
++	}
++
++	k := newSplitJar()
++	k.importCookies(data)
++	if got, want := sent(k), "remember=long;sess=tab;soon=y;theme=dark;"; got != want {
++		t.Errorf("after import, sent = %q, want %q", got, want)
++	}
++	if got := k.scriptCookies(u); got != "soon=y; theme=dark" {
++		t.Errorf("after import, script view = %q (HttpOnly must stay hidden)", got)
++	}
++
++	// An expired record is dropped on import and on the next export.
++	time.Sleep(1100 * time.Millisecond)
++	late := newSplitJar()
++	late.importCookies(data)
++	if got, want := sent(late), "remember=long;sess=tab;theme=dark;"; got != want {
++		t.Errorf("after expiry, sent = %q, want %q", got, want)
++	}
++	if strings.Contains(j.exportCookies(), "soon=") {
++		t.Errorf("expired cookie still exported")
++	}
++	// Nonsense input is ignored.
++	late.importCookies("not json")
 +}
 diff --git a/cmd/tsconnect/wasm/request_js.go b/cmd/tsconnect/wasm/request_js.go
 new file mode 100644
@@ -510,10 +681,34 @@ index 0000000..791213e
 +
 +import _ "golang.org/x/crypto/x509roots/fallback"
 diff --git a/cmd/tsconnect/wasm/wasm_js.go b/cmd/tsconnect/wasm/wasm_js.go
-index 382baea..7932ad5 100644
+index 382baea..4a43bb7 100644
 --- a/cmd/tsconnect/wasm/wasm_js.go
 +++ b/cmd/tsconnect/wasm/wasm_js.go
-@@ -224,6 +224,34 @@ func newIPN(jsConfig js.Value) map[string]any {
+@@ -81,6 +81,14 @@ func newIPN(jsConfig js.Value) map[string]any {
+ 		authKey = jsAuthKey.String()
+ 	}
+ 
++	// A browser tab is an ephemeral node unless the page asks otherwise:
++	// {ephemeral: false} registers a normal node, which stays in the tailnet
++	// after the tab closes so that stored keys keep working.
++	loginFlags := controlclient.LoginEphemeral
++	if jsEphemeral := jsConfig.Get("ephemeral"); jsEphemeral.Type() == js.TypeBoolean && !jsEphemeral.Bool() {
++		loginFlags = controlclient.LoginDefault
++	}
++
+ 	var hostname string
+ 	if jsHostname := jsConfig.Get("hostname"); jsHostname.Type() == js.TypeString {
+ 		hostname = jsHostname.String()
+@@ -157,7 +165,7 @@ func newIPN(jsConfig js.Value) map[string]any {
+ 
+ 	logid := lpc.PublicID
+ 	srv := ipnserver.New(logf, logid, sys.Bus.Get(), sys.NetMon.Get())
+-	lb, err := ipnlocal.NewLocalBackend(logf, logid, sys, controlclient.LoginEphemeral)
++	lb, err := ipnlocal.NewLocalBackend(logf, logid, sys, loginFlags)
+ 	if err != nil {
+ 		log.Fatalf("ipnlocal.NewLocalBackend: %v", err)
+ 	}
+@@ -224,6 +232,44 @@ func newIPN(jsConfig js.Value) map[string]any {
  			url := args[0].String()
  			return jsIPN.fetch(url)
  		}),
@@ -544,6 +739,16 @@ index 382baea..7932ad5 100644
 +				return nil
 +			}
 +			return jsIPN.setCookie(args[0].String(), args[1].String())
++		}),
++		"exportCookies": js.FuncOf(func(this js.Value, args []js.Value) any {
++			return jsIPN.exportCookies()
++		}),
++		"importCookies": js.FuncOf(func(this js.Value, args []js.Value) any {
++			if len(args) != 1 {
++				log.Printf("Usage: importCookies(json)")
++				return nil
++			}
++			return jsIPN.importCookies(args[0].String())
 +		}),
  	}
  }

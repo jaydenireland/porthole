@@ -60,6 +60,9 @@
   .card .btn { margin-top: 20px; }
   .fine { color: var(--muted); font-size: 13.5px; margin-top: 16px; }
   .fine a, .fine .mono { word-break: break-all; }
+  .stay { display: flex; justify-content: center; align-items: center; gap: 8px; margin-top: 18px; font-size: 14.5px; cursor: pointer; }
+  .stay input { width: 16px; height: 16px; flex: none; accent-color: var(--accent); }
+  .stay-help { margin-top: 8px; }
 
   .progress { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; margin-top: 20px; }
   .progress i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width .15s; }
@@ -137,6 +140,9 @@
     #peers button { min-height: 58px; }
     #notice { padding: 10px 12px; }
     #notice button { font-size: 24px; padding: 4px 8px; }
+    .stay { font-size: 16px; min-height: 44px; margin-top: 12px; }
+    .stay input { width: 20px; height: 20px; }
+    .stay-help { margin-top: 2px; }
   }
 </style>
 </head>
@@ -210,10 +216,12 @@
     <section class="view card center" id="viewSignin" hidden>
       <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14" fill="var(--brass)"/><circle cx="16" cy="16" r="10" fill="var(--glass)"/><path d="M6.6 18.5c3.100-2.400 6.300-2.400 9.400 0s6.300 2.400 9.400 0A10 10 0 0 1 6.600 18.500z" fill="#62cfd6"/></svg>
       <h1>Connect this tab to your tailnet</h1>
-      <p class="lede">Sign in with Tailscale to add this tab as a temporary device. It can reach what your account can reach, and nothing passes through a server of ours.</p>
+      <p class="lede">Sign in with Tailscale to add this tab to your tailnet as a device. It can reach what your account can reach, and nothing passes through a server of ours.</p>
       <a class="btn primary large" id="login" target="_blank" rel="noopener" aria-disabled="true">Preparing sign-in…</a>
       <p class="fine" id="loginWaiting" hidden>Finish signing in on the Tailscale page. This tab will continue on its own.</p>
       <p class="fine" id="loginTarget" hidden>After you sign in, Porthole opens <span class="mono" id="loginTargetAddress"></span>.</p>
+      <label class="stay"><input type="checkbox" id="stay"> Stay signed in on this browser</label>
+      <p class="fine stay-help">Leave this off on a shared computer. When it is on, this browser keeps the keys to your tailnet and your logins to its sites until you disconnect, and shows up as a lasting device that you can remove in the Tailscale admin console.</p>
     </section>
 
     <section class="view card center" id="viewApproval" hidden>
@@ -238,6 +246,7 @@
       <p class="empty" id="empty" hidden>No other devices on this tailnet yet.</p>
       <p class="fine">Choosing a device opens <span class="mono">http://device/</span>. If your service uses a port or HTTPS, type it in the address bar, for example <span class="mono">nas:8080</span> or <span class="mono">https://nas</span>.</p>
       <p class="fine">The page you are viewing is kept in this tab's address, so you can bookmark it and come back to the same place.</p>
+      <p class="fine" id="stayNote" hidden>This browser stays signed in. Disconnect to sign out and delete the stored keys.</p>
       <p class="fine" id="self"></p>
     </section>
 
@@ -282,7 +291,11 @@ function stopped(title, text) {
   showHome();
   show("viewStopped");
 }
-$("restart").addEventListener("click", () => location.reload());
+$("restart").addEventListener("click", () => {
+  const url = new URL(location.href);
+  url.searchParams.delete("parked");
+  location.replace(url);
+});
 
 // --- The Tailscale client ---------------------------------------------------
 
@@ -316,15 +329,104 @@ function withProgress(response, onProgress) {
   return new Response(body, { headers: { "Content-Type": "application/wasm" } });
 }
 
-// The device's keys are kept for this tab only, so a reload stays signed in
-// but a closed tab does not. It always registers as an ephemeral device.
+// Where the device's keys are kept.
+//
+// By default they stay in sessionStorage: a reload keeps the tab signed in, a
+// closed tab does not, and the device is registered as ephemeral so Tailscale
+// removes it afterwards. With "Stay signed in" they go to localStorage, which
+// every tab in this browser shares and which survives a restart; the device
+// is then registered as a normal one so the stored keys keep working.
+const STAY_KEY = "porthole-stay-signed-in";
+const KEY_PREFIX = "ipn-state-";
+const COOKIES_KEY = "porthole-site-cookies";
+let stay = false;
+try { stay = localStorage.getItem(STAY_KEY) === "1"; } catch {}
+const keyStore = () => (stay ? localStorage : sessionStorage);
 const stateStorage = {
-  setState(id, value) { try { sessionStorage.setItem("ipn-state-" + id, value); } catch {} },
-  getState(id) { try { return sessionStorage.getItem("ipn-state-" + id) ?? ""; } catch { return ""; } },
+  setState(id, value) { try { keyStore().setItem(KEY_PREFIX + id, value); } catch {} },
+  getState(id) { try { return keyStore().getItem(KEY_PREFIX + id) ?? ""; } catch { return ""; } },
 };
+function deleteKeys() {
+  for (const storage of [sessionStorage, localStorage]) {
+    try {
+      for (const key of Object.keys(storage)) if (key.startsWith(KEY_PREFIX)) storage.removeItem(key);
+      storage.removeItem(COOKIES_KEY);
+    } catch {}
+  }
+}
 
 let ipn;
 let running = false;
+let disconnecting = false;  // signing out, or wiping stored keys before a reload
+
+// A tab that was replaced by a newer one reloads with "?parked" and does not
+// start the client. Tabs can share one identity, and two running clients
+// with the same identity would knock each other offline.
+const parked = new URLSearchParams(location.search).has("parked");
+
+// The logins to tailnet sites themselves (their cookies) are held by the
+// client in memory, so they are saved alongside the keys:
+// - cookies with an expiry date go wherever the keys go, so "remember me" on
+//   a site lasts across tabs only when "Stay signed in" is on;
+// - cookies without one are session cookies, and always go to sessionStorage,
+//   which lasts exactly as long as this tab does.
+function saveCookies() {
+  if (!ipn) return;
+  let all;
+  try { all = JSON.parse(ipn.exportCookies()); } catch { return; }
+  try {
+    if (stay) {
+      localStorage.setItem(COOKIES_KEY, JSON.stringify(all.filter((c) => !c.session)));
+      sessionStorage.setItem(COOKIES_KEY, JSON.stringify(all.filter((c) => c.session)));
+    } else {
+      sessionStorage.setItem(COOKIES_KEY, JSON.stringify(all));
+    }
+  } catch (e) {
+    debug("could not save site cookies", e);
+  }
+}
+function restoreCookies() {
+  for (const storage of stay ? [localStorage, sessionStorage] : [sessionStorage]) {
+    try {
+      const saved = storage.getItem(COOKIES_KEY);
+      if (saved) ipn.importCookies(saved);
+    } catch {}
+  }
+}
+let saveTimer;
+function saveCookiesSoon() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveCookies, 250);
+}
+addEventListener("pagehide", () => { if (!disconnecting) saveCookies(); });
+
+$("stay").checked = stay;
+$("stayNote").hidden = !stay;
+// The choice decides how the device registers, which is fixed when the client
+// starts, so changing it restarts the page. This only shows before sign-in,
+// when there is nothing to lose.
+$("stay").addEventListener("change", () => {
+  const on = $("stay").checked;
+  try {
+    if (on) localStorage.setItem(STAY_KEY, "1"); else localStorage.removeItem(STAY_KEY);
+  } catch {
+    $("stay").checked = false;
+    notify("This browser won't let Porthole store anything, so it can't stay signed in here.");
+    return;
+  }
+  disconnecting = true;  // stops the page from saving cookies again as it reloads
+  deleteKeys();
+  location.reload();
+});
+
+// Signs out, deletes the stored keys and the "stay signed in" choice, and
+// starts over with a fresh client. The address after "#" is kept, so signing
+// in again returns to the page that was open.
+function finishDisconnect() {
+  deleteKeys();
+  try { localStorage.removeItem(STAY_KEY); } catch {}
+  location.reload();
+}
 let superseded = false;  // another tab took over; ignore further state changes
 
 // The address being viewed is kept after "#" in this page's own address, so a
@@ -361,6 +463,7 @@ function setState(state) {
       }
       break;
     case "NeedsLogin":
+      if (disconnecting) { finishDisconnect(); return; }
       setStatus("Not connected", "warn");
       show("viewSignin");
       // Ask for the sign-in address up front, so the button is a plain link
@@ -506,7 +609,7 @@ function setLoading(on) {
   if (on) loadingTimer = setTimeout(() => setLoading(false), 30000);
 }
 
-const bridge = createBridge({
+const bridge = parked ? null : createBridge({
   frame: $("frame"),
   request: async (req) => {
     if (!running) throw new Error("Porthole is not connected to your tailnet.");
@@ -534,12 +637,14 @@ const bridge = createBridge({
     rememberAddress(url);
     refreshControls();
   },
+  onCookiesChanged: saveCookiesSoon,
   onError: (message) => { setLoading(false); debug("error", message); },
   onSuperseded: () => {
+    // Reload into the parked state, which stops this tab's client.
     superseded = true;
-    stopped("Porthole is open in another tab", "Only one tab can browse at a time, and a newer one took over. This tab is still signed in.");
-    $("restart").textContent = "Use Porthole here";
-    setStatus("In another tab", "warn");
+    const url = new URL(location.href);
+    url.searchParams.set("parked", "1");
+    location.replace(url);
   },
 });
 
@@ -601,11 +706,12 @@ $("reload").addEventListener("click", () => step(0));
 
 $("login").addEventListener("click", () => { $("loginWaiting").hidden = false; });
 $("logout").addEventListener("click", () => {
-  // Signing in again returns to the page that was open.
-  pendingTarget = hashTarget();
-  showPendingTarget();
-  loginAsked = false;
+  // The page reloads once the client has signed out.
+  disconnecting = true;
+  $("logout").disabled = true;
+  setStatus("Signing out", "warn");
   ipn.logout();
+  setTimeout(finishDisconnect, 6000);  // if the sign-out never completes
 });
 
 // --- Startup ----------------------------------------------------------------
@@ -623,6 +729,7 @@ async function start() {
       wasmURL: "/node/main.wasm",
       hostname: "porthole",
       stateStorage,
+      ephemeral: !stay,
       onProgress: (fraction) => {
         $("progress").className = "progress";
         $("progress").firstElementChild.style.width = Math.round(fraction * 100) + "%";
@@ -634,6 +741,7 @@ async function start() {
     stopped("Porthole couldn't start", "The Tailscale client for this tab failed to load. Check your connection and reload.");
     return;
   }
+  restoreCookies();
   ipn.run({
     notifyState: setState,
     notifyNetMap: renderNetMap,
@@ -647,7 +755,13 @@ async function start() {
   });
 }
 
-start();
+if (parked) {
+  stopped("Porthole is open in another tab", "Only one tab can browse at a time, and a newer one took over.");
+  $("restart").textContent = "Use Porthole here";
+  setStatus("In another tab", "warn");
+} else {
+  start();
+}
 </script>
 </body>
 </html>

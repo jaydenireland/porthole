@@ -237,6 +237,7 @@ function next(pred, what) {
   });
 }
 
+let cookieChanges = 0;     // times the bridge said a cookie changed
 async function run() {
   const C = TailnetCodec;
   check("label codec round-trip",
@@ -254,6 +255,7 @@ async function run() {
     request: (req) => { servedByFirst++; return fakeNode(req); },
     websocket: fakeSocket,
     cookies: fakeCookies,
+    onCookiesChanged: () => cookieChanges++,
     onNavigated: (url) => navigated.push(url),
     onError: (m) => errors.push(m),
     onSuperseded: () => supersededCount++,
@@ -294,6 +296,7 @@ async function run() {
   check("cookies: cookie set by a later response reaches the page", out.cookieAfterResponse === "csrftoken=abc; theme=dark; fresh=1", out.cookieAfterResponse);
   check("cookies: script delete", out.cookieAfterDelete === "csrftoken=abc; fresh=1", out.cookieAfterDelete);
   check("cookies: script cannot create an HttpOnly cookie", out.cookieAfterHttpOnly === "csrftoken=abc; fresh=1", out.cookieAfterHttpOnly);
+  check("cookies: the app is told about every change, so it can save them", cookieChanges >= 4, String(cookieChanges));
   check("streaming: first chunk arrives while the response is still open", out.stream === "one|two", out.stream);
   check("streaming: EventSource receives events", out.sse === "a,b", out.sse);
   for (let i = 0; i < 40 && !eventStreamCancelled; i++) await new Promise((r) => setTimeout(r, 50));

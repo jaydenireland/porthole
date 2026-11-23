@@ -16,7 +16,7 @@ const cacheDir = path.join(here, ".cache");
 const LIMIT = 25 * 1024 * 1024;
 
 // Paths under web/ that are not part of the published site.
-const SKIP = new Set(["README.md", "build.sh", "tsconnect.patch", "node/main.wasm"]);
+const SKIP = new Set(["README.md", "build.sh", "make-patch.sh", "tsconnect.patch", "node/main.wasm"]);
 
 function copy(dir) {
   for (const entry of fs.readdirSync(path.join(web, dir), { withFileTypes: true })) {
