@@ -7,9 +7,13 @@ use ts_keys::{NodeState, PersistState};
 use url::Url;
 use wasm_bindgen::prelude::*;
 
+use futures_util::StreamExt;
+
 use crate::{
     control::{Connection, Registration},
     error::Error,
+    netmap::Netmap,
+    relay,
 };
 
 #[wasm_bindgen(start)]
@@ -35,6 +39,8 @@ struct Inner {
     keys: NodeState,
     connection: RefCell<Option<Rc<Connection>>>,
     sign_in: RefCell<Option<Url>>,
+    signed_in: std::cell::Cell<bool>,
+    netmap: RefCell<Netmap>,
 }
 
 impl Inner {
@@ -89,6 +95,8 @@ impl Client {
                 keys,
                 connection: RefCell::new(None),
                 sign_in: RefCell::new(None),
+                signed_in: std::cell::Cell::new(false),
+                netmap: RefCell::new(Netmap::default()),
             }),
         })
     }
@@ -106,7 +114,10 @@ impl Client {
         let inner = self.inner.clone();
         let connection = inner.connection().await?;
         match connection.register(&inner.config, &inner.keys, None).await? {
-            Registration::Authorized => Ok(None),
+            Registration::Authorized => {
+                inner.signed_in.set(true);
+                Ok(None)
+            }
             Registration::NeedsSignIn(url) => {
                 let address = url.to_string();
                 *inner.sign_in.borrow_mut() = Some(url);
@@ -126,10 +137,82 @@ impl Client {
             match connection.register(&inner.config, &inner.keys, waiting_on).await? {
                 Registration::Authorized => {
                     inner.sign_in.borrow_mut().take();
+                    inner.signed_in.set(true);
                     return Ok(());
                 }
                 Registration::NeedsSignIn(url) => *inner.sign_in.borrow_mut() = Some(url),
             }
         }
     }
+
+    /// Start following the tailnet. `on_devices` is called with the device
+    /// list as JSON (`{ self: {...}, peers: [...] }`) whenever it changes,
+    /// and `on_closed` once if the control server stops sending updates.
+    /// Resolves when the first request has been accepted. The device must be
+    /// signed in.
+    pub async fn watch(
+        &self,
+        on_devices: js_sys::Function,
+        on_closed: js_sys::Function,
+    ) -> Result<(), Error> {
+        let inner = self.inner.clone();
+        if !inner.signed_in.get() {
+            return Err(Error::NotSignedIn);
+        }
+        let connection = inner.connection().await?;
+        let updates = connection.updates(&inner.config, &inner.keys).await?;
+        wasm_bindgen_futures::spawn_local(async move {
+            let mut updates = std::pin::pin!(updates);
+            while let Some(update) = updates.next().await {
+                let changed = inner.netmap.borrow_mut().apply(update);
+                if !changed {
+                    continue;
+                }
+                let json = inner.netmap.borrow().to_json();
+                if let Some(json) = json {
+                    // A page callback that throws must not stop the updates.
+                    drop(on_devices.call1(&JsValue::NULL, &json.into()));
+                }
+            }
+            tracing::info!("the control server stopped sending updates");
+            drop(on_closed.call0(&JsValue::NULL));
+        });
+        Ok(())
+    }
+
+    /// The relays the control server told us about, as JSON:
+    /// `[{ id, code, name, hosts: ["derp1.tailscale.com", ...] }]`.
+    /// Empty until [`Client::watch`] has received its first update.
+    pub fn relays(&self) -> String {
+        let netmap = self.inner.netmap.borrow();
+        let list: Vec<_> = netmap
+            .relays()
+            .iter()
+            .map(|(id, region)| {
+                let hosts: Vec<String> = region
+                    .servers
+                    .iter()
+                    .filter(|s| !s.stun_only)
+                    .map(|s| match s.https_port {
+                        443 => s.hostname.clone(),
+                        port => format!("{}:{port}", s.hostname),
+                    })
+                    .collect();
+                serde_json::json!({
+                    "id": id.0.get(),
+                    "code": region.info.code,
+                    "name": region.info.name,
+                    "hosts": hosts,
+                })
+            })
+            .collect();
+        serde_json::Value::Array(list).to_string()
+    }
+}
+
+/// Diagnostic: resolves if this browser can pass a packet through the relay
+/// at `host` (for example `derp1.tailscale.com`). Needs no sign-in.
+#[wasm_bindgen(js_name = relayCheck)]
+pub async fn relay_check(host: String) -> Result<(), Error> {
+    relay::check(&host).await
 }

@@ -1253,6 +1253,7 @@ name = "porthole-client"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "futures-util",
  "getrandom 0.2.17",
  "getrandom 0.4.3",
  "gloo-net",
@@ -1267,6 +1268,7 @@ dependencies = [
  "ts_capabilityversion",
  "ts_control",
  "ts_control_noise",
+ "ts_derp",
  "ts_http_util",
  "ts_keys",
  "url",

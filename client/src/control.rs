@@ -13,9 +13,15 @@ use ts_control::{Config, RegistrationError, client as control};
 use ts_http_util::{BytesBody, Http2};
 use ts_keys::{MachineKeyPair, MachinePublicKey, NodeState};
 use url::Url;
-use ws_stream_wasm::WsMeta;
+use futures_util::Stream;
+use ts_control::StateUpdate;
 
-use crate::{challenge::SkipChallenge, error::Error, local::Local};
+use crate::{
+    challenge::SkipChallenge,
+    error::Error,
+    local::Local,
+    socket::{self, Socket},
+};
 
 /// Query parameter carrying the first handshake message, and the WebSocket
 /// subprotocol, as Tailscale's own browser client sends them.
@@ -26,7 +32,7 @@ const SUBPROTOCOL: &str = "tailscale-control-protocol";
 pub struct Connection {
     http: Http2<BytesBody>,
     // Closing the socket ends the channel, so it lives as long as we do.
-    _socket: WsMeta,
+    _socket: Socket,
 }
 
 /// What the control server said about this device.
@@ -97,8 +103,7 @@ impl Connection {
             .query_pairs_mut()
             .append_pair(HANDSHAKE_PARAM, &first_message);
 
-        let (socket, stream) = WsMeta::connect(socket_url.as_str(), vec![SUBPROTOCOL]).await?;
-        let stream = Local(stream.into_io());
+        let (socket, stream) = socket::open(socket_url.as_str(), SUBPROTOCOL).await?;
 
         let channel = handshake.complete(stream, machine_keys).await?;
         // The server may open with a challenge, which we do not answer.
@@ -129,5 +134,17 @@ impl Connection {
             }
             Err(e) => Err(Error::Registration(e.to_string())),
         }
+    }
+
+    /// Start receiving the tailnet's state: this device, the others, the
+    /// relays. The device must be registered first.
+    pub async fn updates(
+        &self,
+        config: &Config,
+        keys: &NodeState,
+    ) -> Result<impl Stream<Item = StateUpdate> + use<>, Error> {
+        control::start_stream(&config.server_url, keys, config, self.http.clone())
+            .await
+            .map_err(|e| Error::Netmap(e.to_string()))
     }
 }

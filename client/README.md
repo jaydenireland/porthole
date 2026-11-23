@@ -10,7 +10,7 @@ oldest browser it can run in. Measured on the same Mac in Chrome (the test page 
 
 | | Go client | This client, so far |
 |---|---|---|
-| Download, compressed | 4.8 MB | about 0.4 MB |
+| Download, compressed | 4.8 MB | about 0.5 MB |
 | Memory after start | 18 MB | 1.5 MB |
 | Time to a sign-in address | about 1.2 s | 0.1 to 0.3 s |
 
@@ -23,19 +23,25 @@ is added.
 - Connecting to Tailscale's control server from a browser tab.
 - Registering the device and getting the address where the user signs in.
 - Waiting for that sign-in to finish.
+- Passing packets between devices through a Tailscale relay (DERP) over a
+  WebSocket.
+
+Written but not yet run against a tailnet, because it needs a person to sign
+in: following the device list and the relay list after sign-in. Open
+`/test/client-rs-signin.html` to try it.
 
 ## What is left
 
 In the order it needs doing:
 
-1. The device list: start the map stream (`ts_control`) and report peers.
-2. The relay connection: DERP over a WebSocket (`ts_derp`).
-3. WireGuard over the relay (`ts_tunnel`) and a TCP/IP stack on top
+1. Telling the control server which relay this device listens on, and
+   answering the control server's pings.
+2. WireGuard over the relay (`ts_tunnel`) and a TCP/IP stack on top
    (`ts_netstack_smoltcp`).
-4. TLS to `https://` tailnet sites (rustls), then HTTP, cookies and
+3. TLS to `https://` tailnet sites (rustls), then HTTP, cookies and
    WebSockets over that, with the same JavaScript API the Go build gives the
    app (`request`, `websocket`, `cookies`, `setCookie`).
-5. Switching `web/app/` over, and building for the oldest browsers we can
+4. Switching `web/app/` over, and building for the oldest browsers we can
    reach.
 
 ## Build and test
@@ -47,7 +53,11 @@ RUN_TESTS=1 ./build.sh     # runs the tests first
 
 Then start the site (`../serve.py`) and open
 `http://localhost:8791/test/client-rs.html`. It connects to Tailscale's real
-control server and asks for a sign-in address, without signing in.
+control server, asks for a sign-in address, and passes a packet between two
+throwaway devices through a Tailscale relay, all without signing in.
+
+`/test/client-rs-signin.html` goes further and needs you: it shows the
+sign-in link, then lists your devices and the relays.
 
 `build.sh` fetches tailscale-rs at a pinned commit into `../tailscale-rs-src`
 and applies `tailscale-rs.patch`. After changing files there, run
@@ -57,8 +67,11 @@ and applies `tailscale-rs.patch`. After changing files there, run
 
 | File | Purpose |
 |---|---|
-| `src/tab.rs` | the API the page sees: `new Client(...)`, `state()`, `signInAddress()`, `waitForSignIn()`. |
+| `src/tab.rs` | the API the page sees: `new Client(...)`, `state()`, `signInAddress()`, `waitForSignIn()`, `watch()`, `relays()`, and the `relayCheck()` diagnostic. |
 | `src/control.rs` | the control server connection over a WebSocket. |
+| `src/netmap.rs` | the tab's picture of the tailnet, kept up to date from the control server's updates. |
+| `src/relay.rs` | a relay (DERP) connection over a WebSocket. |
+| `src/socket.rs` | a WebSocket as a byte stream. |
 | `src/challenge.rs` | steps past the control server's optional opening challenge without waiting for it. |
 | `src/local.rs` | lets single-threaded browser values satisfy the libraries' `Send` bounds. |
 | `src/error.rs` | the errors the page can be shown. |
@@ -69,16 +82,18 @@ and applies `tailscale-rs.patch`. After changing files there, run
 Everything that is a protocol comes from a library:
 
 - tailscale-rs: keys, the Noise handshake with the control server, the HTTP/2
-  channel inside it, registration.
+  channel inside it, registration, the device-list stream, the relay
+  protocol.
 - hyper and h2 (through tailscale-rs): HTTP/2.
 - ws_stream_wasm: a WebSocket as a byte stream.
 - gloo-net: `fetch`.
 - wasm-bindgen: the JavaScript bindings.
 
 Our own code is the glue: opening the WebSocket the way Tailscale's browser
-client does (the first handshake message goes in the address, with the
-`tailscale-control-protocol` subprotocol), and the challenge handling in
-`challenge.rs`.
+client does (for the control server the first handshake message goes in the
+address, with the `tailscale-control-protocol` subprotocol; for a relay the
+subprotocol is `derp`), keeping the device list current, and the challenge
+handling in `challenge.rs`.
 
 ## The patch
 

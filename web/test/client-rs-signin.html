@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rust client sign-in test</title>
+<body style="font:15px/1.5 system-ui,sans-serif;color-scheme:light dark;padding:16px;max-width:720px">
+<h1 style="font-size:18px">Rust client sign-in test</h1>
+<p>Signs this tab in to your tailnet with the Rust build of the client and lists your devices. The tab joins as a temporary device named <code>porthole-rs-test</code>, which Tailscale removes after it goes offline. Its keys stay in this tab until you close it.</p>
+<p id="status">Starting…</p>
+<p><a id="signin" target="_blank" rel="noopener" hidden>Sign in with Tailscale</a></p>
+<h2 style="font-size:16px" id="devicesTitle" hidden>Devices</h2>
+<ul id="devices"></ul>
+<h2 style="font-size:16px" id="relaysTitle" hidden>Relays</h2>
+<p id="relays" style="color:gray"></p>
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const status = (text) => { $("status").textContent = text; };
+const KEY = "porthole-rs-test-state";
+try {
+  const { default: init, Client } = await import("/client/porthole_client.js");
+  await init();
+  const client = new Client("porthole-rs-test", true, sessionStorage.getItem(KEY) ?? undefined);
+  sessionStorage.setItem(KEY, client.state());
+
+  status("Connecting to the control server…");
+  const address = await client.signInAddress();
+  if (address) {
+    $("signin").href = address;
+    $("signin").hidden = false;
+    status("Waiting for you to sign in.");
+    await client.waitForSignIn();
+    $("signin").hidden = true;
+  }
+
+  status("Signed in. Asking for the device list…");
+  await client.watch((json) => {
+    const map = JSON.parse(json);
+    const online = map.peers.filter((p) => p.online).length;
+    status(`Signed in as ${map.self.name.replace(/\.$/, "")} (${map.self.addresses[0]}). ${online} of ${map.peers.length} other devices online.`);
+    $("devicesTitle").hidden = false;
+    $("devices").replaceChildren(...map.peers
+      .sort((a, b) => (b.online === true) - (a.online === true) || a.name.localeCompare(b.name))
+      .map((p) => {
+        const li = document.createElement("li");
+        li.textContent = `${p.name.replace(/\.$/, "")}  ${p.addresses[0]}  ${p.online ? "online" : "offline"}`;
+        return li;
+      }));
+    const relays = JSON.parse(client.relays());
+    $("relaysTitle").hidden = false;
+    $("relays").textContent = relays.map((r) => `${r.code} (${r.hosts.join(", ")})`).join("; ");
+  }, () => status("The control server stopped sending updates. Reload to reconnect."));
+} catch (e) {
+  status("Failed: " + (e && e.message || e));
+}
+</script>
+</body>

@@ -20,6 +20,7 @@ tokio = { version = "1", default-features = false, features = ["io-util"] }
 ts_capabilityversion = { path = "../tailscale-rs-src/crates/capabilities/ts_capabilityversion" }
 ts_control = { path = "../tailscale-rs-src/crates/control_plane/ts_control" }
 ts_control_noise = { path = "../tailscale-rs-src/crates/control_plane/ts_control_noise" }
+ts_derp = { path = "../tailscale-rs-src/crates/net/underlay/ts_derp" }
 ts_http_util = { path = "../tailscale-rs-src/crates/utils/ts_http_util" }
 ts_keys = { path = "../tailscale-rs-src/crates/utils/ts_keys", features = ["serde"] }
 
@@ -37,6 +38,7 @@ tracing = { version = "0.1", default-features = false }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std"], optional = true }
 tracing-web = { version = "0.1", optional = true }
 
+futures-util = { version = "0.3", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
