@@ -15,7 +15,10 @@ use crate::{
     engine::Engine,
     netmap::Netmap,
     relay,
+    site::{Dialer, Site, Stream},
+    tls,
 };
+use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 #[wasm_bindgen(start)]
 fn start() {
@@ -35,14 +38,42 @@ fn start() {
     }
 }
 
-struct Inner {
+/// What a connection to a device needs: who the devices are, and the engine.
+pub(crate) struct Net {
+    pub(crate) netmap: RefCell<Netmap>,
+    pub(crate) engine: Engine,
+}
+
+/// Opens connections to devices through the tunnel.
+pub(crate) struct Tunnel(Rc<Net>);
+
+impl Dialer for Tunnel {
+    async fn dial(&self, host: &str, port: u16) -> std::io::Result<Stream> {
+        let address = self.0.netmap.borrow().resolve(host).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, format!("no device is called {host}"))
+        })?;
+        let stream = self
+            .0
+            .engine
+            .connect(std::net::SocketAddr::new(address, port))
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        // The socket speaks the `futures` flavour of async I/O; hyper,
+        // rustls and tungstenite here speak tokio's.
+        Ok(Box::new(stream.compat()))
+    }
+}
+
+pub(crate) struct Inner {
     config: Config,
     keys: NodeState,
     connection: RefCell<Option<Rc<Connection>>>,
     sign_in: RefCell<Option<Url>>,
     signed_in: std::cell::Cell<bool>,
-    netmap: RefCell<Netmap>,
-    engine: Engine,
+    /// The tailnet as we know it and the engine that reaches it.
+    pub(crate) net: Rc<Net>,
+    /// Requests, sockets and cookies for the sites on it.
+    pub(crate) site: Site<Tunnel>,
     /// The relay region other devices reach us on, once chosen.
     home_relay: std::cell::Cell<Option<u32>>,
 }
@@ -51,13 +82,13 @@ impl Inner {
     /// Bring the engine in line with the latest picture of the tailnet.
     async fn sync_engine(self: &Rc<Self>) {
         let (addresses, relays, peers) = {
-            let mut netmap = self.netmap.borrow_mut();
+            let mut netmap = self.net.netmap.borrow_mut();
             (netmap.addresses(), netmap.relay_hosts(), netmap.engine_peers())
         };
-        self.engine.set_relays(relays.clone());
-        self.engine.set_peers(&peers);
+        self.net.engine.set_relays(relays.clone());
+        self.net.engine.set_peers(&peers);
         if let Some(addresses) = addresses
-            && let Err(error) = self.engine.set_addresses(addresses).await
+            && let Err(error) = self.net.engine.set_addresses(addresses).await
         {
             tracing::warn!(%error, "could not set this device's addresses");
         }
@@ -83,7 +114,7 @@ impl Inner {
         let region = relay::nearest(relays)
             .await
             .ok_or_else(|| Error::Relay("no relay answered".into()))?;
-        self.engine.listen_on(region).await?;
+        self.net.engine.listen_on(region).await?;
         let connection = self.connection().await?;
         connection.set_home_relay(&self.config, &self.keys, region).await?;
         self.home_relay.set(Some(region));
@@ -104,7 +135,7 @@ impl Inner {
 /// One device on the tailnet, living in this tab.
 #[wasm_bindgen]
 pub struct Client {
-    inner: Rc<Inner>,
+    pub(crate) inner: Rc<Inner>,
 }
 
 #[wasm_bindgen]
@@ -136,15 +167,19 @@ impl Client {
             tags: Vec::new(),
             ephemeral,
         };
+        let net = Rc::new(Net {
+            netmap: RefCell::new(Netmap::default()),
+            engine: Engine::new(keys.node_keys.clone()),
+        });
         Ok(Client {
             inner: Rc::new(Inner {
-                engine: Engine::new(keys.node_keys.clone()),
+                site: Site::new(Tunnel(net.clone()), tls::config()),
+                net,
                 config,
                 keys,
                 connection: RefCell::new(None),
                 sign_in: RefCell::new(None),
                 signed_in: std::cell::Cell::new(false),
-                netmap: RefCell::new(Netmap::default()),
                 home_relay: std::cell::Cell::new(None),
             }),
         })
@@ -213,12 +248,12 @@ impl Client {
         wasm_bindgen_futures::spawn_local(async move {
             let mut updates = std::pin::pin!(updates);
             while let Some(update) = updates.next().await {
-                let changed = inner.netmap.borrow_mut().apply(update);
+                let changed = inner.net.netmap.borrow_mut().apply(update);
                 inner.sync_engine().await;
                 if !changed {
                     continue;
                 }
-                let json = inner.netmap.borrow().to_json();
+                let json = inner.net.netmap.borrow().to_json();
                 if let Some(json) = json {
                     // A page callback that throws must not stop the updates.
                     drop(on_devices.call1(&JsValue::NULL, &json.into()));
@@ -234,7 +269,7 @@ impl Client {
     /// `[{ id, code, name, hosts: ["derp1.tailscale.com", ...] }]`.
     /// Empty until [`Client::watch`] has received its first update.
     pub fn relays(&self) -> String {
-        let netmap = self.inner.netmap.borrow();
+        let netmap = self.inner.net.netmap.borrow();
         let list: Vec<_> = netmap
             .relays()
             .iter()
@@ -270,11 +305,12 @@ impl Client {
     pub async fn tcp_probe(&self, host: String, port: u16, request: String) -> Result<String, Error> {
         let inner = self.inner.clone();
         let address = inner
+            .net
             .netmap
             .borrow()
             .resolve(&host)
             .ok_or_else(|| Error::Network(format!("no device is called {host}")))?;
-        let stream = inner.engine.connect(std::net::SocketAddr::new(address, port)).await?;
+        let stream = inner.net.engine.connect(std::net::SocketAddr::new(address, port)).await?;
         let mut left = request.as_bytes();
         while !left.is_empty() {
             let sent = stream.send(left).await.map_err(|e| Error::Network(e.to_string()))?;
@@ -288,6 +324,7 @@ impl Client {
 
 /// Diagnostic: resolves if this browser can pass a packet through the relay
 /// at `host` (for example `derp1.tailscale.com`). Needs no sign-in.
+#[cfg(feature = "diagnostics")]
 #[wasm_bindgen(js_name = relayCheck)]
 pub async fn relay_check(host: String) -> Result<(), Error> {
     relay::check(&host).await
@@ -296,7 +333,17 @@ pub async fn relay_check(host: String) -> Result<(), Error> {
 /// Diagnostic: resolves if two throwaway devices in this browser can set up
 /// WireGuard through the relay at `host` and exchange data over TCP. Needs
 /// no sign-in.
+#[cfg(feature = "diagnostics")]
 #[wasm_bindgen(js_name = pathCheck)]
 pub async fn path_check(host: String) -> Result<(), Error> {
-    crate::engine::check(&host).await
+    crate::selftest::path(&host).await
+}
+
+/// Diagnostic: resolves if, between two throwaway devices in this browser,
+/// an HTTP request, an HTTPS request with its certificate checked, a cookie
+/// round trip and a WebSocket all work. Needs no sign-in.
+#[cfg(feature = "diagnostics")]
+#[wasm_bindgen(js_name = siteCheck)]
+pub async fn site_check(host: String) -> Result<(), Error> {
+    crate::selftest::site(&host).await
 }

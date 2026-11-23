@@ -6,9 +6,15 @@
 #   ./build.sh /path/to/src    use an existing patched tailscale-rs checkout
 #   RUN_TESTS=1 ./build.sh     also run the tests first
 #
-# Needs git, Rust with the wasm32-unknown-unknown target
-# (rustup target add wasm32-unknown-unknown), and wasm-bindgen's command-line
-# tool at the version in Cargo.lock; the script says how to install it.
+# Needs:
+# - git;
+# - Rust with the wasm32-unknown-unknown target
+#   (rustup target add wasm32-unknown-unknown);
+# - wasm-bindgen's command-line tool at the version in Cargo.lock; the script
+#   says how to install it;
+# - a clang that can compile for WebAssembly, for the C parts of the TLS
+#   crypto library (ring). Apple's cannot; Homebrew's can (brew install llvm).
+#   Set CC_wasm32_unknown_unknown and AR_wasm32_unknown_unknown to use another.
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DEFAULT_SRC="$HERE/../tailscale-rs-src"
@@ -43,6 +49,23 @@ HAVE="$(wasm-bindgen --version 2>/dev/null | awk '{ print $2 }' || true)"
 if [ "$HAVE" != "$WANT" ]; then
   echo "wasm-bindgen $WANT is needed (found: ${HAVE:-none}). Install it with:" >&2
   echo "  cargo install wasm-bindgen-cli --version $WANT --locked" >&2
+  exit 1
+fi
+
+# Find a clang that can target WebAssembly, unless one was named.
+if [ -z "${CC_wasm32_unknown_unknown:-}" ]; then
+  for LLVM in /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin; do
+    if [ -x "$LLVM/clang" ]; then
+      export CC_wasm32_unknown_unknown="$LLVM/clang"
+      export AR_wasm32_unknown_unknown="$LLVM/llvm-ar"
+      break
+    fi
+  done
+fi
+CLANG="${CC_wasm32_unknown_unknown:-clang}"
+if ! echo 'int x;' | "$CLANG" --target=wasm32-unknown-unknown -c -x c - -o /dev/null 2>/dev/null; then
+  echo "$CLANG cannot compile for WebAssembly. Install one that can:" >&2
+  echo "  brew install llvm" >&2
   exit 1
 fi
 

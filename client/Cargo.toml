@@ -11,7 +11,30 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# What a page needs from the network, written against any byte stream so it
+# can be tested on this machine: HTTP (hyper), TLS (rustls with the ring
+# crypto library and Mozilla's root certificates), cookies, WebSockets.
+bytes = "1"
+cookie = "0.18"
+cookie_store = { version = "0.22", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", default-features = false, features = ["client", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+psl = "2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = { version = "1", features = ["web"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+time = "0.3"
 tokio = { version = "1", default-features = false, features = ["io-util"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+url = "2"
+web-time = "1"
+webpki-roots = "1"
 
 # Everything else is for the browser build.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -48,23 +71,29 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 tracing-web = { version = "0.1", optional = true }
 
 futures-channel = "0.3"
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-url = "2"
-web-time = "1"
 
 # Random numbers come from the browser. These lines only switch that on in
 # the versions of getrandom that the crates above pull in.
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 
+# In a browser, ring gets its random numbers from the page, and `time` reads
+# the page's clock.
+ring = { version = "0.17", features = ["wasm32_unknown_unknown_js"] }
+time = { version = "0.3", features = ["wasm-bindgen"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+# Makes the certificate the checks use.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"], optional = true }
+
 [dev-dependencies]
-tokio = { version = "1", features = ["io-util", "macros", "rt"] }
+hyper = { version = "1", features = ["server", "http1"] }
+rcgen = "0.14"
+tokio = { version = "1", features = ["io-util", "macros", "rt", "time"] }
 
 [features]
-default = ["console-log"]
+default = ["console-log", "diagnostics"]
+# The checks the test page runs: relayCheck, pathCheck, siteCheck.
+diagnostics = ["dep:rcgen"]
 console-log = ["dep:tracing-subscriber", "dep:tracing-web"]
 
 [profile.release]

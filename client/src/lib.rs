@@ -11,8 +11,12 @@
 //! everything above it) is not implemented yet.
 
 mod challenge;
+mod cookies;
+mod http;
+mod site;
+mod tls;
 
-// Everything below needs a browser. The module above does not, so its tests
+// Everything below needs a browser. The modules above do not, so their tests
 // run natively with `cargo test --target <host>`.
 #[cfg(target_arch = "wasm32")]
 mod control;
@@ -25,11 +29,17 @@ mod local;
 #[cfg(target_arch = "wasm32")]
 mod netmap;
 #[cfg(target_arch = "wasm32")]
+mod page;
+#[cfg(target_arch = "wasm32")]
 mod relay;
+#[cfg(all(target_arch = "wasm32", feature = "diagnostics"))]
+mod selftest;
 #[cfg(target_arch = "wasm32")]
 mod socket;
 #[cfg(target_arch = "wasm32")]
 mod tab;
 
 #[cfg(target_arch = "wasm32")]
-pub use tab::{Client, path_check, relay_check};
+pub use tab::Client;
+#[cfg(all(target_arch = "wasm32", feature = "diagnostics"))]
+pub use tab::{path_check, relay_check, site_check};

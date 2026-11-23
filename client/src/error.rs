@@ -26,6 +26,10 @@ pub enum Error {
     Relay(String),
     #[error("network error: {0}")]
     Network(String),
+    #[error("{0}")]
+    Site(#[from] crate::site::Error),
+    #[error("usage: {0}")]
+    Usage(&'static str),
 }
 
 impl From<Error> for JsValue {
