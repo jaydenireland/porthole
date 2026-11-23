@@ -4,11 +4,19 @@
 <title>Rust client sign-in test</title>
 <body style="font:15px/1.5 system-ui,sans-serif;color-scheme:light dark;padding:16px;max-width:720px">
 <h1 style="font-size:18px">Rust client sign-in test</h1>
-<p>Signs this tab in to your tailnet with the Rust build of the client and lists your devices. The tab joins as a temporary device named <code>porthole-rs-test</code>, which Tailscale removes after it goes offline. Its keys stay in this tab until you close it.</p>
+<p>Signs this tab in to your tailnet with the Rust build of the client, lists your devices, and lets you open a connection to one. The tab joins as a temporary device named <code>porthole-rs-test</code>, which Tailscale removes after it goes offline. Its keys stay in this tab until you close it.</p>
 <p id="status">Starting…</p>
 <p><a id="signin" target="_blank" rel="noopener" hidden>Sign in with Tailscale</a></p>
 <h2 style="font-size:16px" id="devicesTitle" hidden>Devices</h2>
 <ul id="devices"></ul>
+<form id="probe" hidden style="margin:16px 0">
+  <h2 style="font-size:16px">Reach a device</h2>
+  <p>Opens a TCP connection to a device through WireGuard and a relay, sends a plain web request, and shows the start of the answer.</p>
+  <input id="probeHost" placeholder="device name, for example nas" required style="font:inherit;padding:6px 8px">
+  <input id="probePort" type="number" value="80" min="1" max="65535" required style="font:inherit;padding:6px 8px;width:6em">
+  <button style="font:inherit;padding:6px 12px">Connect</button>
+  <pre id="probeOut" style="white-space:pre-wrap;word-break:break-all"></pre>
+</form>
 <h2 style="font-size:16px" id="relaysTitle" hidden>Relays</h2>
 <p id="relays" style="color:gray"></p>
 <script type="module">
@@ -31,12 +39,26 @@ try {
     $("signin").hidden = true;
   }
 
+  $("probe").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const host = $("probeHost").value.trim();
+    const started = performance.now();
+    $("probeOut").textContent = "Connecting…";
+    try {
+      const answer = await client.tcpProbe(host, Number($("probePort").value), `GET / HTTP/1.0\r\nHost: ${host}\r\n\r\n`);
+      $("probeOut").textContent = `Answered in ${Math.round(performance.now() - started)} ms:\n\n${answer.slice(0, 600)}`;
+    } catch (e) {
+      $("probeOut").textContent = "Failed: " + (e && e.message || e);
+    }
+  });
+
   status("Signed in. Asking for the device list…");
   await client.watch((json) => {
     const map = JSON.parse(json);
     const online = map.peers.filter((p) => p.online).length;
     status(`Signed in as ${map.self.name.replace(/\.$/, "")} (${map.self.addresses[0]}). ${online} of ${map.peers.length} other devices online.`);
     $("devicesTitle").hidden = false;
+    $("probe").hidden = false;
     $("devices").replaceChildren(...map.peers
       .sort((a, b) => (b.online === true) - (a.online === true) || a.name.localeCompare(b.name))
       .map((p) => {

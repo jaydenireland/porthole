@@ -45,8 +45,8 @@ Each tailnet site is shown on its own subdomain, such as
 | Page loading, cookies, WebSockets, streaming | Open `/test/mock.html`. It uses stand-in sites and needs no tailnet. |
 | Client start | Open `/test/client.html`. It starts the client and asks Tailscale for a sign-in address, without signing in. |
 | Go code added to the client | `RUN_TESTS=1 web/build.sh` |
-| Rust client start and relay (work in progress) | `client/build.sh`, then open `/test/client-rs.html`. |
-| Rust client sign-in and device list | Open `/test/client-rs-signin.html` and sign in. |
+| Rust client: control server, relay, WireGuard and TCP (work in progress) | `client/build.sh`, then open `/test/client-rs.html`. |
+| Rust client against your tailnet | Open `/test/client-rs-signin.html`, sign in, and connect to a device. |
 | Rust client code | `RUN_TESTS=1 client/build.sh` |
 
 Add `?report` to either page to have it send its result to the server log,

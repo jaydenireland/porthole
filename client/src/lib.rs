@@ -17,6 +17,8 @@ mod challenge;
 #[cfg(target_arch = "wasm32")]
 mod control;
 #[cfg(target_arch = "wasm32")]
+mod engine;
+#[cfg(target_arch = "wasm32")]
 mod error;
 #[cfg(target_arch = "wasm32")]
 mod local;
@@ -30,4 +32,4 @@ mod socket;
 mod tab;
 
 #[cfg(target_arch = "wasm32")]
-pub use tab::{Client, relay_check};
+pub use tab::{Client, path_check, relay_check};

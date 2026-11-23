@@ -136,6 +136,35 @@ impl Connection {
         }
     }
 
+    /// Tell the control server which relay region other devices should use to
+    /// reach this one.
+    pub async fn set_home_relay(
+        &self,
+        config: &Config,
+        keys: &NodeState,
+        region: u32,
+    ) -> Result<(), Error> {
+        let region = std::num::NonZeroU32::new(region)
+            .ok_or_else(|| Error::Relay("relay regions are numbered from 1".into()))?;
+        let mut request = ts_control::MapRequestBuilder::new(keys)
+            .as_request()
+            .preferred_derp(ts_derp::RegionId(region));
+        if let Some(hostname) = &config.hostname {
+            request = request.hostname(hostname);
+        }
+        let url = config.server_url.join("machine/map")?;
+        let answer = control::send_map_request(request.build(), &url, &self.http)
+            .await
+            .map_err(|e| Error::Netmap(e.to_string()))?;
+        // The answer carries nothing we need, but the request is only done
+        // once it has been read.
+        let mut answer = std::pin::pin!(answer);
+        tokio::io::copy(&mut answer, &mut tokio::io::sink())
+            .await
+            .map_err(|e| Error::Netmap(e.to_string()))?;
+        Ok(())
+    }
+
     /// Start receiving the tailnet's state: this device, the others, the
     /// relays. The device must be registered first.
     pub async fn updates(

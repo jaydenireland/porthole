@@ -144,6 +144,101 @@ index c2515ec..3c90bda 100644
  rand.workspace = true
  proptest.workspace = true
  
+diff --git a/crates/net/protocol/ts_tunnel/src/endpoint.rs b/crates/net/protocol/ts_tunnel/src/endpoint.rs
+index d32241d..a7ef3b8 100644
+--- a/crates/net/protocol/ts_tunnel/src/endpoint.rs
++++ b/crates/net/protocol/ts_tunnel/src/endpoint.rs
+@@ -1,5 +1,7 @@
+ use core::time::Duration;
+-use std::{collections::HashMap, time::Instant};
++use std::collections::HashMap;
++
++use ts_time::Instant;
+ 
+ use itertools::Itertools;
+ use ts_keys::{NodeKeyPair, NodePublicKey};
+diff --git a/crates/net/protocol/ts_tunnel/src/handshake.rs b/crates/net/protocol/ts_tunnel/src/handshake.rs
+index 52ae789..ca5ba87 100644
+--- a/crates/net/protocol/ts_tunnel/src/handshake.rs
++++ b/crates/net/protocol/ts_tunnel/src/handshake.rs
+@@ -1,9 +1,10 @@
+ use std::{
+     mem::replace,
+     ops::Add,
+-    time::{Duration, Instant},
+ };
+ 
++use ts_time::{Duration, Instant};
++
+ use ts_keys::{NodeKeyPair, NodePublicKey};
+ use ts_noise::ikpsk2;
+ use ts_packet::PacketMut;
+diff --git a/crates/net/protocol/ts_tunnel/src/macs.rs b/crates/net/protocol/ts_tunnel/src/macs.rs
+index e55bb7b..4f7ca3b 100644
+--- a/crates/net/protocol/ts_tunnel/src/macs.rs
++++ b/crates/net/protocol/ts_tunnel/src/macs.rs
+@@ -1,8 +1,9 @@
+ use std::{
+     ops::Add,
+-    time::{Duration, Instant},
+ };
+ 
++use ts_time::{Duration, Instant};
++
+ use aead::{Aead, Payload, consts::U16};
+ use blake2::{Blake2s256, Blake2sMac, Digest, digest::FixedOutput};
+ use chacha20poly1305::{KeyInit, XChaCha20Poly1305};
+diff --git a/crates/net/protocol/ts_tunnel/src/session.rs b/crates/net/protocol/ts_tunnel/src/session.rs
+index 28745cf..f59c52e 100644
+--- a/crates/net/protocol/ts_tunnel/src/session.rs
++++ b/crates/net/protocol/ts_tunnel/src/session.rs
+@@ -1,9 +1,10 @@
+ use core::fmt::{Debug, Formatter};
+ use std::{
+     sync::Mutex,
+-    time::{Duration, Instant},
+ };
+ 
++use ts_time::{Duration, Instant};
++
+ use aead::AeadInPlace;
+ use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
+ use ts_packet::PacketMut;
+diff --git a/crates/net/protocol/ts_tunnel/src/time.rs b/crates/net/protocol/ts_tunnel/src/time.rs
+index fd14537..b7f2295 100644
+--- a/crates/net/protocol/ts_tunnel/src/time.rs
++++ b/crates/net/protocol/ts_tunnel/src/time.rs
+@@ -1,5 +1,5 @@
+ use core::fmt::{Debug, Display, Formatter};
+-use std::time::{SystemTime, UNIX_EPOCH};
++use ts_time::{SystemTime, UNIX_EPOCH};
+ 
+ use zerocopy::{
+     FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout, Unaligned,
+diff --git a/crates/net/ts_dataplane/src/lib.rs b/crates/net/ts_dataplane/src/lib.rs
+index c1b5dc2..dba8504 100644
+--- a/crates/net/ts_dataplane/src/lib.rs
++++ b/crates/net/ts_dataplane/src/lib.rs
+@@ -5,9 +5,10 @@ extern crate ts_disco_protocol as disco;
+ use std::{
+     collections::HashMap,
+     sync::Arc,
+-    time::{Duration, Instant},
+ };
+ 
++use ts_time::{Duration, Instant};
++
+ use ts_bart::RoutingTable;
+ use ts_packet::PacketMut;
+ use ts_packetfilter::{FilterExt, IpProto};
+@@ -15,6 +16,7 @@ use ts_time::{Handle, Scheduler, TimeRange};
+ use ts_transport::PeerId;
+ use ts_tunnel::{Endpoint, NodeKeyPair};
+ 
++#[cfg(feature = "async_tokio")]
+ pub mod async_tokio;
+ pub mod overlay_router;
+ mod packet_ident;
 diff --git a/crates/net/underlay/ts_derp/Cargo.toml b/crates/net/underlay/ts_derp/Cargo.toml
 index af3ca41..912bdf6 100644
 --- a/crates/net/underlay/ts_derp/Cargo.toml
@@ -475,3 +570,33 @@ index 0000000..070d017
 +}
 +
 +pub(crate) use imp::{Task, executor};
+diff --git a/crates/utils/ts_time/Cargo.toml b/crates/utils/ts_time/Cargo.toml
+index 6040e25..c021d58 100644
+--- a/crates/utils/ts_time/Cargo.toml
++++ b/crates/utils/ts_time/Cargo.toml
+@@ -10,6 +10,9 @@ edition.workspace = true
+ license.workspace = true
+ rust-version.workspace = true
+ 
++[dependencies]
++web-time = "1"
++
+ [dev-dependencies]
+ proptest.workspace = true
+ 
+diff --git a/crates/utils/ts_time/src/lib.rs b/crates/utils/ts_time/src/lib.rs
+index 28ebf29..58ae261 100644
+--- a/crates/utils/ts_time/src/lib.rs
++++ b/crates/utils/ts_time/src/lib.rs
+@@ -1,7 +1,10 @@
+ #![doc = include_str!("../README.md")]
+ #![forbid(unsafe_code)]
+ 
+-pub use std::time::{Duration, Instant};
++// The standard library's clocks panic in a browser. `web_time` is the
++// standard library's types on every other target, and reads the page's clock
++// there.
++pub use web_time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+ use std::{
+     cmp::min,
+     sync::{Arc, Mutex, Weak},

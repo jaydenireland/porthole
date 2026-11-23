@@ -3,14 +3,14 @@
 <title>Rust client start test</title>
 <body style="font:14px/1.5 system-ui,sans-serif;color-scheme:light dark;padding:16px">
 <h1 style="font-size:18px">Rust client start test</h1>
-<p>Loads the Rust build of the Tailscale client in this browser, connects to the control server, asks for a sign-in address, and passes a packet between two throwaway devices through a Tailscale relay. It does not sign in. Add <code>?report</code> to send the result to the server log.</p>
+<p>Loads the Rust build of the Tailscale client in this browser, connects to the control server, asks for a sign-in address, and then uses two throwaway devices to pass a packet through a Tailscale relay and to open a TCP connection over WireGuard through it. It does not sign in. Add <code>?report</code> to send the result to the server log.</p>
 <pre id="out">running…</pre>
 <script type="module">
 const out = { ua: navigator.userAgent, secure: window.isSecureContext };
 const t0 = performance.now();
 const ms = () => Math.round(performance.now() - t0);
 try {
-  const { default: init, Client, relayCheck } = await import("/client/porthole_client.js");
+  const { default: init, Client, relayCheck, pathCheck } = await import("/client/porthole_client.js");
   const wasm = await init();
   out.loadedMs = ms();
   const client = new Client("porthole-test", true);
@@ -30,8 +30,17 @@ try {
   ]);
   out.relayPacketMs = ms() - relayStart;
   out.relayOk = true;
+  // The whole path: two throwaway devices set up WireGuard through the relay
+  // and one opens a TCP connection to the other.
+  const pathStart = ms();
+  await Promise.race([
+    pathCheck("derp1.tailscale.com"),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("path check timed out after 30 s")), 30000)),
+  ]);
+  out.pathMs = ms() - pathStart;
+  out.pathOk = true;
   out.wasmMemoryMB = Math.round(wasm.memory.buffer.byteLength / 1048576 * 10) / 10;
-  out.ok = out.gotSignInAddress === true && out.relayOk === true;
+  out.ok = out.gotSignInAddress === true && out.relayOk === true && out.pathOk === true;
 } catch (e) {
   out.ok = false;
   out.error = String(e && e.message || e);

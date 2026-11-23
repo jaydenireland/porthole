@@ -24,6 +24,8 @@ pub enum Error {
     Netmap(String),
     #[error("the relay connection failed: {0}")]
     Relay(String),
+    #[error("network error: {0}")]
+    Network(String),
 }
 
 impl From<Error> for JsValue {

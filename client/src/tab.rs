@@ -12,6 +12,7 @@ use futures_util::StreamExt;
 use crate::{
     control::{Connection, Registration},
     error::Error,
+    engine::Engine,
     netmap::Netmap,
     relay,
 };
@@ -41,9 +42,55 @@ struct Inner {
     sign_in: RefCell<Option<Url>>,
     signed_in: std::cell::Cell<bool>,
     netmap: RefCell<Netmap>,
+    engine: Engine,
+    /// The relay region other devices reach us on, once chosen.
+    home_relay: std::cell::Cell<Option<u32>>,
 }
 
 impl Inner {
+    /// Bring the engine in line with the latest picture of the tailnet.
+    async fn sync_engine(self: &Rc<Self>) {
+        let (addresses, relays, peers) = {
+            let mut netmap = self.netmap.borrow_mut();
+            (netmap.addresses(), netmap.relay_hosts(), netmap.engine_peers())
+        };
+        self.engine.set_relays(relays.clone());
+        self.engine.set_peers(&peers);
+        if let Some(addresses) = addresses
+            && let Err(error) = self.engine.set_addresses(addresses).await
+        {
+            tracing::warn!(%error, "could not set this device's addresses");
+        }
+        if self.home_relay.get().is_none() && !relays.is_empty() {
+            // Marked first so a second update does not start a second choice.
+            self.home_relay.set(Some(0));
+            let this = self.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Err(error) = this.choose_home_relay(&relays).await {
+                    tracing::warn!(%error, "could not set a home relay; other devices cannot answer yet");
+                    this.home_relay.set(None);
+                }
+            });
+        }
+    }
+
+    /// Pick the nearest relay, connect to it, and tell the control server,
+    /// so other devices know where to send packets for us.
+    async fn choose_home_relay(
+        &self,
+        relays: &std::collections::HashMap<u32, String>,
+    ) -> Result<(), Error> {
+        let region = relay::nearest(relays)
+            .await
+            .ok_or_else(|| Error::Relay("no relay answered".into()))?;
+        self.engine.listen_on(region).await?;
+        let connection = self.connection().await?;
+        connection.set_home_relay(&self.config, &self.keys, region).await?;
+        self.home_relay.set(Some(region));
+        tracing::info!(region, "home relay set");
+        Ok(())
+    }
+
     async fn connection(&self) -> Result<Rc<Connection>, Error> {
         if let Some(open) = self.connection.borrow().as_ref() {
             return Ok(open.clone());
@@ -91,12 +138,14 @@ impl Client {
         };
         Ok(Client {
             inner: Rc::new(Inner {
+                engine: Engine::new(keys.node_keys.clone()),
                 config,
                 keys,
                 connection: RefCell::new(None),
                 sign_in: RefCell::new(None),
                 signed_in: std::cell::Cell::new(false),
                 netmap: RefCell::new(Netmap::default()),
+                home_relay: std::cell::Cell::new(None),
             }),
         })
     }
@@ -165,6 +214,7 @@ impl Client {
             let mut updates = std::pin::pin!(updates);
             while let Some(update) = updates.next().await {
                 let changed = inner.netmap.borrow_mut().apply(update);
+                inner.sync_engine().await;
                 if !changed {
                     continue;
                 }
@@ -210,9 +260,43 @@ impl Client {
     }
 }
 
+#[wasm_bindgen]
+impl Client {
+    /// Diagnostic: open a TCP connection to `host` (a device name or tailnet
+    /// address) on `port`, send `request`, and resolve to the first bytes of
+    /// the answer as text. For example, sending `GET / HTTP/1.0\r\n\r\n` to
+    /// port 80 returns the start of a web server's reply.
+    #[wasm_bindgen(js_name = tcpProbe)]
+    pub async fn tcp_probe(&self, host: String, port: u16, request: String) -> Result<String, Error> {
+        let inner = self.inner.clone();
+        let address = inner
+            .netmap
+            .borrow()
+            .resolve(&host)
+            .ok_or_else(|| Error::Network(format!("no device is called {host}")))?;
+        let stream = inner.engine.connect(std::net::SocketAddr::new(address, port)).await?;
+        let mut left = request.as_bytes();
+        while !left.is_empty() {
+            let sent = stream.send(left).await.map_err(|e| Error::Network(e.to_string()))?;
+            left = &left[sent..];
+        }
+        let mut answer = vec![0u8; 2048];
+        let got = stream.recv(&mut answer).await.map_err(|e| Error::Network(e.to_string()))?;
+        Ok(String::from_utf8_lossy(&answer[..got]).into_owned())
+    }
+}
+
 /// Diagnostic: resolves if this browser can pass a packet through the relay
 /// at `host` (for example `derp1.tailscale.com`). Needs no sign-in.
 #[wasm_bindgen(js_name = relayCheck)]
 pub async fn relay_check(host: String) -> Result<(), Error> {
     relay::check(&host).await
+}
+
+/// Diagnostic: resolves if two throwaway devices in this browser can set up
+/// WireGuard through the relay at `host` and exchange data over TCP. Needs
+/// no sign-in.
+#[wasm_bindgen(js_name = pathCheck)]
+pub async fn path_check(host: String) -> Result<(), Error> {
+    crate::engine::check(&host).await
 }

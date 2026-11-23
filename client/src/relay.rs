@@ -68,3 +68,23 @@ pub async fn check(host: &str) -> Result<(), Error> {
     }
     Ok(())
 }
+
+/// Picks the relay region that answers first from this browser, which is the
+/// one other devices should use to reach us. `hosts` maps region numbers to
+/// host names.
+pub async fn nearest(hosts: &std::collections::HashMap<u32, String>) -> Option<u32> {
+    let probes = hosts.iter().map(|(region, host)| {
+        let (region, url) = (*region, format!("https://{host}/derp/latency-check"));
+        Box::pin(async move {
+            // The answer is not readable from another site and does not need
+            // to be: only how quickly it arrives matters.
+            gloo_net::http::Request::get(&url)
+                .mode(web_sys::RequestMode::NoCors)
+                .send()
+                .await
+                .map(|_| region)
+        })
+    });
+    let (region, _slower) = futures_util::future::select_ok(probes).await.ok()?;
+    Some(region)
+}

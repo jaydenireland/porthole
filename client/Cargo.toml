@@ -20,16 +20,25 @@ tokio = { version = "1", default-features = false, features = ["io-util"] }
 ts_capabilityversion = { path = "../tailscale-rs-src/crates/capabilities/ts_capabilityversion" }
 ts_control = { path = "../tailscale-rs-src/crates/control_plane/ts_control" }
 ts_control_noise = { path = "../tailscale-rs-src/crates/control_plane/ts_control_noise" }
+ts_bart = { path = "../tailscale-rs-src/crates/data_structures/ts_bart" }
+ts_dataplane = { path = "../tailscale-rs-src/crates/net/ts_dataplane", default-features = false }
 ts_derp = { path = "../tailscale-rs-src/crates/net/underlay/ts_derp" }
+ts_netstack_smoltcp = { path = "../tailscale-rs-src/crates/net/overlay/ts_netstack_smoltcp", features = ["futures-io"] }
+ts_packet = { path = "../tailscale-rs-src/crates/utils/ts_packet" }
+ts_packetfilter = { path = "../tailscale-rs-src/crates/net/overlay/ts_packetfilter" }
+ts_transport = { path = "../tailscale-rs-src/crates/net/ts_transport" }
+ts_tunnel = { path = "../tailscale-rs-src/crates/net/protocol/ts_tunnel" }
 ts_http_util = { path = "../tailscale-rs-src/crates/utils/ts_http_util" }
 ts_keys = { path = "../tailscale-rs-src/crates/utils/ts_keys", features = ["serde"] }
 
 # Browser bindings.
 console_error_panic_hook = "0.1"
+gloo-timers = { version = "0.3", features = ["futures"] }
 gloo-net = { version = "0.6", default-features = false, features = ["http"] }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["RequestMode"] }
 ws_stream_wasm = { version = "0.7", features = ["tokio_io"] }
 
 # The libraries report what they are doing through `tracing`. With the
@@ -38,11 +47,13 @@ tracing = { version = "0.1", default-features = false }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std"], optional = true }
 tracing-web = { version = "0.1", optional = true }
 
-futures-util = { version = "0.3", default-features = false }
+futures-channel = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 url = "2"
+web-time = "1"
 
 # Random numbers come from the browser. These lines only switch that on in
 # the versions of getrandom that the crates above pull in.
