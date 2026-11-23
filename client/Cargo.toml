@@ -17,6 +17,7 @@ crate-type = ["cdylib", "rlib"]
 bytes = "1"
 cookie = "0.18"
 cookie_store = { version = "0.22", default-features = false }
+flate2 = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 http = "1"
 http-body-util = "0.1"

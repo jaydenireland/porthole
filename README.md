@@ -47,7 +47,7 @@ Each tailnet site is shown on its own subdomain, such as
 | Go code added to the client | `RUN_TESTS=1 web/build.sh` |
 | Rust client: control server, relay, WireGuard, TCP, HTTP, TLS, WebSockets (work in progress) | `client/build.sh`, then open `/test/client-rs.html`. |
 | Rust client against your tailnet | Open `/test/client-rs-signin.html`, sign in, and connect to a device. |
-| Rust client code (24 tests) | `RUN_TESTS=1 client/build.sh` |
+| Rust client code (29 tests) | `RUN_TESTS=1 client/build.sh` |
 
 Add `?report` to either page to have it send its result to the server log,
 which helps on a device with no way to read the screen closely.

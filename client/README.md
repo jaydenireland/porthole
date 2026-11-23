@@ -67,8 +67,9 @@ In the order it needs doing:
    what it turns up.
 2. Answering the control server's pings, and reconnecting when the control
    connection or a relay drops. Today the app shows "Porthole stopped".
-3. Speed: every request opens its own connection, and responses are not
-   compressed. The Go client reused connections and asked for gzip.
+3. Speed, measured against the Go client on real sites. Connections are
+   now reused, responses are asked for gzip-compressed, and TCP buffers are
+   128 KB, but none of that has been timed on a real tailnet.
 4. Timers: the TCP stack and WireGuard rely on the page's timers, which
    browsers slow down in hidden tabs. The Go client has the same weakness.
 5. Building for the oldest browsers we can reach, and running a size
@@ -88,7 +89,7 @@ devices, it passes a packet through a Tailscale relay, opens a TCP
 connection over WireGuard through it, and makes HTTP, HTTPS and WebSocket
 requests over that. None of this signs in.
 
-`RUN_TESTS=1 ./build.sh` also runs 24 tests on this machine. They cover the
+`RUN_TESTS=1 ./build.sh` also runs 29 tests on this machine. They cover the
 parts that need no browser: HTTP, TLS, cookies and WebSockets against a
 small server inside the test, and the challenge handling.
 
@@ -110,8 +111,8 @@ and applies `tailscale-rs.patch`. After changing files there, run
 |---|---|
 | `src/tab.rs` | signing in and following the tailnet: `new Client(...)`, `state()`, `signInAddress()`, `waitForSignIn()`, `watch()`, `relays()`, `tcpProbe()`. |
 | `src/page.rs` | what pages use: `request()`, `websocket()`, `cookies()`, `setCookie()`, `exportCookies()`, `importCookies()`. |
-| `src/site.rs` | requests and WebSockets to a site: connect, add TLS, send, keep cookies. |
-| `src/http.rs` | one HTTP request over a connection, with the body read a piece at a time. |
+| `src/site.rs` | requests and WebSockets to a site: connect or reuse a connection, add TLS, send, keep cookies. |
+| `src/http.rs` | HTTP requests over a connection that is kept for the next one, with the body read a piece at a time and gzip unpacked. |
 | `src/tls.rs` | TLS settings and certificate checking. |
 | `src/cookies.rs` | the cookie jar, with a browser's rules for scripts. |
 | `src/selftest.rs` | the checks the test page runs: `relayCheck()`, `pathCheck()`, `siteCheck()`, `pairedClient()`. |

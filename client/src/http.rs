@@ -1,4 +1,4 @@
-//! One HTTP/1.1 request over a connection the caller supplies.
+//! HTTP/1.1 requests over connections the caller supplies.
 //!
 //! hyper does the protocol. This module shapes it for a page: the status and
 //! headers come back as soon as they arrive, and the body is read a piece at
@@ -6,15 +6,23 @@
 //! (server-sent events) through. Redirects are not followed, because the
 //! page's service worker has to see them.
 //!
-//! Each request uses its own connection, which is closed afterwards.
+//! Two things here are for speed, since every round trip to a device goes
+//! through a relay:
+//!
+//! - A connection can carry one request after another. When a response has
+//!   been read to the end, its connection is handed back to whoever asked
+//!   (see [`Recycle`]) instead of being closed.
+//! - Responses are asked for gzip-compressed and unpacked here, unless the
+//!   page chose its own `Accept-Encoding`.
 
-use std::{future::Future, pin::Pin};
+use std::{future::Future, io::Write, pin::Pin};
 
 use bytes::Bytes;
+use flate2::write::GzDecoder;
 use futures_util::future::{Either, select};
 use http::{HeaderName, HeaderValue, Method, header};
 use http_body_util::{BodyExt, Full};
-use hyper::body::Incoming;
+use hyper::{body::Incoming, client::conn::http1::SendRequest};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
 use url::Url;
@@ -25,8 +33,11 @@ pub enum Error {
     Request(String),
     #[error("{0}")]
     Connection(#[from] hyper::Error),
+    #[error("the compressed response could not be unpacked: {0}")]
+    Compression(std::io::Error),
 }
 
+#[derive(Clone)]
 pub struct Request {
     pub method: String,
     pub url: Url,
@@ -44,13 +55,27 @@ pub struct Head {
 
 /// Keeps the connection moving. hyper splits a connection into the part that
 /// sends requests and a task that does the reading and writing; rather than
-/// hand that task to some runtime, the body drives it whenever it is read.
+/// hand that task to some runtime, whoever is using the connection drives it.
 type Driver = Pin<Box<dyn Future<Output = Result<(), hyper::Error>>>>;
 
-/// The rest of a response. Dropping it closes the connection.
+/// An open connection to a site, between requests.
+pub struct Connection {
+    sender: SendRequest<Full<Bytes>>,
+    driver: Driver,
+}
+
+/// Where a connection goes when its response has been read to the end and it
+/// can take another request.
+pub type Recycle = Box<dyn FnOnce(Connection)>;
+
+/// The rest of a response. Dropping it before the end closes the connection.
 pub struct Body {
     incoming: Incoming,
+    sender: Option<SendRequest<Full<Bytes>>>,
     driver: Option<Driver>,
+    recycle: Option<Recycle>,
+    unpack: Option<GzDecoder<Vec<u8>>>,
+    ended: bool,
 }
 
 /// Headers that describe the connection, not the request. We set these.
@@ -71,7 +96,9 @@ pub fn host_header(url: &Url) -> Option<String> {
     })
 }
 
-fn build(request: Request) -> Result<http::Request<Full<Bytes>>, Error> {
+/// The request as hyper wants it, and whether we were the ones to ask for a
+/// compressed response (and so must unpack it).
+fn build(request: Request) -> Result<(http::Request<Full<Bytes>>, bool), Error> {
     let bad = |what: &str| Error::Request(what.to_owned());
     let method = Method::from_bytes(request.method.as_bytes()).map_err(|_| bad("method"))?;
     let host = host_header(&request.url).ok_or_else(|| bad("the address has no host"))?;
@@ -88,7 +115,6 @@ fn build(request: Request) -> Result<http::Request<Full<Bytes>>, Error> {
         .map_err(|e| Error::Request(e.to_string()))?;
     let headers = built.headers_mut();
     headers.insert(header::HOST, HeaderValue::from_str(&host).map_err(|_| bad("host"))?);
-    headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
     for (name, value) in request.headers {
         let name = HeaderName::from_bytes(name.as_bytes())
             .map_err(|_| Error::Request(format!("header name {name:?}")))?;
@@ -99,49 +125,139 @@ fn build(request: Request) -> Result<http::Request<Full<Bytes>>, Error> {
             .map_err(|_| Error::Request(format!("value of header {name}")))?;
         headers.append(name, value);
     }
-    Ok(built)
+    // A request for part of a file must get those exact bytes back.
+    let asked_for_gzip =
+        !headers.contains_key(header::ACCEPT_ENCODING) && !headers.contains_key(header::RANGE);
+    if asked_for_gzip {
+        headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+    }
+    Ok((built, asked_for_gzip))
 }
 
-/// Send `request` over `stream` and wait for the start of the response.
+/// Start speaking HTTP on `stream`.
+pub async fn connect<Io>(stream: Io) -> Result<Connection, Error>
+where
+    Io: AsyncRead + AsyncWrite + Unpin + 'static,
+{
+    let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+    Ok(Connection { sender, driver: Box::pin(connection) })
+}
+
+/// Send `request` over `stream` and wait for the start of the response. The
+/// connection is closed when the response has been read.
 pub async fn send<Io>(stream: Io, request: Request) -> Result<(Head, Body), Error>
 where
     Io: AsyncRead + AsyncWrite + Unpin + 'static,
 {
-    let request = build(request)?;
-    let (mut sender, connection) =
-        hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
-    let driver: Driver = Box::pin(connection);
+    connect(stream).await?.send(request, None).await
+}
 
-    let (response, driver) = match select(Box::pin(sender.send_request(request)), driver).await {
-        Either::Left((response, driver)) => (response?, Some(driver)),
-        // The connection finished first, which it can when the whole response
-        // has already arrived; the response is then ready too. An error from
-        // the connection at this point may only be about closing it (the
-        // other end hung up first), so it counts only if no response came.
-        Either::Right((done, response)) => match response.await {
-            Ok(response) => (response, None),
-            Err(error) => return Err(done.err().unwrap_or(error).into()),
-        },
-    };
+impl Connection {
+    /// Send `request` and wait for the start of the response. If `recycle`
+    /// is given and the connection is still good once the body has been
+    /// read to the end, the connection is passed to it.
+    pub async fn send(
+        self,
+        request: Request,
+        recycle: Option<Recycle>,
+    ) -> Result<(Head, Body), Error> {
+        let (request, asked_for_gzip) = build(request)?;
+        let Connection { mut sender, driver } = self;
 
-    let (parts, incoming) = response.into_parts();
-    let head = Head {
-        status: parts.status.as_u16(),
-        status_text: parts.status.canonical_reason().unwrap_or("").to_owned(),
-        headers: parts
+        let exchange = async {
+            // After an earlier request, wait until the connection can take another.
+            sender.ready().await?;
+            sender.send_request(request).await
+        };
+        let (response, driver) = match select(Box::pin(exchange), driver).await {
+            Either::Left((response, driver)) => (response?, Some(driver)),
+            // The connection finished first, which it can when the whole
+            // response has already arrived; the response is then ready too.
+            // An error from the connection at this point may only be about
+            // closing it (the other end hung up first), so it counts only if
+            // no response came.
+            Either::Right((done, exchange)) => match exchange.await {
+                Ok(response) => (response, None),
+                Err(error) => return Err(done.err().unwrap_or(error).into()),
+            },
+        };
+
+        let (mut parts, incoming) = response.into_parts();
+        let closing = parts
             .headers
+            .get_all(header::CONNECTION)
             .iter()
-            .map(|(name, value)| {
-                (name.as_str().to_owned(), String::from_utf8_lossy(value.as_bytes()).into_owned())
-            })
-            .collect(),
-    };
-    Ok((head, Body { incoming, driver }))
+            .any(|value| value.as_bytes().eq_ignore_ascii_case(b"close"));
+        let gzipped = asked_for_gzip
+            && parts
+                .headers
+                .get(header::CONTENT_ENCODING)
+                .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"gzip"));
+        if gzipped {
+            // What the page gets is the unpacked body, of unknown length.
+            parts.headers.remove(header::CONTENT_ENCODING);
+            parts.headers.remove(header::CONTENT_LENGTH);
+        }
+
+        let head = Head {
+            status: parts.status.as_u16(),
+            status_text: parts.status.canonical_reason().unwrap_or("").to_owned(),
+            headers: parts
+                .headers
+                .iter()
+                .map(|(name, value)| {
+                    (name.as_str().to_owned(), String::from_utf8_lossy(value.as_bytes()).into_owned())
+                })
+                .collect(),
+        };
+        let body = Body {
+            incoming,
+            sender: Some(sender),
+            driver,
+            recycle: if closing { None } else { recycle },
+            unpack: gzipped.then(|| GzDecoder::new(Vec::new())),
+            ended: false,
+        };
+        Ok((head, body))
+    }
 }
 
 impl Body {
     /// The next piece of the body, or `None` at the end.
     pub async fn chunk(&mut self) -> Result<Option<Bytes>, Error> {
+        loop {
+            if self.ended {
+                return Ok(None);
+            }
+            let Some(piece) = self.next_piece().await? else {
+                self.ended = true;
+                self.give_back();
+                // Whatever the decoder was still holding.
+                if let Some(mut unpack) = self.unpack.take() {
+                    unpack.try_finish().map_err(Error::Compression)?;
+                    let rest = std::mem::take(unpack.get_mut());
+                    if !rest.is_empty() {
+                        return Ok(Some(Bytes::from(rest)));
+                    }
+                }
+                return Ok(None);
+            };
+            match &mut self.unpack {
+                None => return Ok(Some(piece)),
+                Some(unpack) => {
+                    unpack.write_all(&piece).map_err(Error::Compression)?;
+                    let unpacked = std::mem::take(unpack.get_mut());
+                    // A piece can be all header, with nothing to show yet.
+                    if !unpacked.is_empty() {
+                        return Ok(Some(Bytes::from(unpacked)));
+                    }
+                }
+            }
+        }
+    }
+
+    /// The next piece as it came over the connection.
+    async fn next_piece(&mut self) -> Result<Option<Bytes>, Error> {
         loop {
             let frame = match self.driver.take() {
                 Some(driver) => match select(self.incoming.frame(), driver).await {
@@ -163,6 +279,19 @@ impl Body {
                     _ => {}
                 },
             }
+        }
+    }
+
+    /// The response is finished: let the connection be used again, if it
+    /// is still open and someone wants it.
+    fn give_back(&mut self) {
+        let (Some(recycle), Some(sender), Some(driver)) =
+            (self.recycle.take(), self.sender.take(), self.driver.take())
+        else {
+            return;
+        };
+        if !sender.is_closed() {
+            recycle(Connection { sender, driver });
         }
     }
 }
@@ -218,6 +347,23 @@ pub(crate) mod tests {
                     Some((Ok(Frame::data(Bytes::from(format!("piece {n}\n")))), n + 1))
                 });
                 http::Response::new(StreamBody::new(pieces).boxed())
+            }
+            "/gzip" => {
+                let wants_gzip = parts
+                    .headers
+                    .get("accept-encoding")
+                    .is_some_and(|v| v.as_bytes().windows(4).any(|w| w == b"gzip"));
+                let text = "compressed ".repeat(500);
+                if wants_gzip {
+                    let mut packer = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                    packer.write_all(text.as_bytes()).unwrap();
+                    http::Response::builder()
+                        .header("content-encoding", "gzip")
+                        .body(full(packer.finish().unwrap()))
+                        .unwrap()
+                } else {
+                    http::Response::new(full(text))
+                }
             }
             _ => http::Response::builder().status(404).body(full("not found")).unwrap(),
         };

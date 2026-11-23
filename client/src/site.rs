@@ -4,7 +4,7 @@
 //! How a connection to a device is opened is left to a [`Dialer`], so this
 //! works over the tunnel in a browser and over an in-memory pipe in tests.
 
-use std::{cell::RefCell, future::Future, io, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, future::Future, io, rc::Rc, sync::Arc, time::Duration};
 
 use rustls::ClientConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -16,7 +16,7 @@ use url::Url;
 
 use crate::{
     cookies::Jar,
-    http::{self, Body, Head, Request},
+    http::{self, Body, Connection, Head, Recycle, Request},
     tls,
 };
 
@@ -47,10 +47,48 @@ pub enum Error {
     WebSocket(#[from] tungstenite::Error),
 }
 
+/// How long an unused connection is kept. Servers close idle connections
+/// after a while without saying so; a short limit means we rarely try one
+/// that is already gone.
+const IDLE_LIMIT: Duration = Duration::from_secs(30);
+/// Unused connections kept per site. A page loads several things at once.
+const IDLE_PER_SITE: usize = 8;
+
+/// Scheme, host and port: what a connection can be reused for.
+type Origin = (String, String, u16);
+
+/// Open connections waiting for their next request.
+#[derive(Default)]
+struct Idle {
+    connections: HashMap<Origin, Vec<(Connection, web_time::Instant)>>,
+}
+
+impl Idle {
+    /// The most recently used connection to `origin` that is not too old.
+    fn take(&mut self, origin: &Origin) -> Option<Connection> {
+        let waiting = self.connections.get_mut(origin)?;
+        while let Some((connection, since)) = waiting.pop() {
+            if since.elapsed() < IDLE_LIMIT {
+                return Some(connection);
+            }
+        }
+        None
+    }
+
+    fn put(&mut self, origin: Origin, connection: Connection) {
+        let waiting = self.connections.entry(origin).or_default();
+        waiting.retain(|(_, since)| since.elapsed() < IDLE_LIMIT);
+        if waiting.len() < IDLE_PER_SITE {
+            waiting.push((connection, web_time::Instant::now()));
+        }
+    }
+}
+
 pub struct Site<D> {
     dialer: D,
     tls: Arc<ClientConfig>,
     jar: RefCell<Jar>,
+    idle: Rc<RefCell<Idle>>,
 }
 
 /// An open WebSocket and the subprotocol the server chose, if any.
@@ -58,7 +96,7 @@ pub type Socket = (WebSocketStream<Stream>, Option<String>);
 
 impl<D: Dialer> Site<D> {
     pub fn new(dialer: D, tls: Arc<ClientConfig>) -> Self {
-        Self { dialer, tls, jar: RefCell::default() }
+        Self { dialer, tls, jar: RefCell::default(), idle: Rc::default() }
     }
 
     pub fn jar(&self) -> &RefCell<Jar> {
@@ -93,8 +131,7 @@ impl<D: Dialer> Site<D> {
         if let Some(cookies) = self.jar.borrow().header_for(&url) {
             request.headers.push(("cookie".to_owned(), cookies));
         }
-        let stream = self.open(&url).await?;
-        let (head, body) = http::send(stream, request).await?;
+        let (head, body) = self.exchange(&url, request).await?;
         let set = head
             .headers
             .iter()
@@ -102,6 +139,34 @@ impl<D: Dialer> Site<D> {
             .map(|(_, value)| value.as_str());
         let changed = self.jar.borrow_mut().store_response(&url, set);
         Ok((head, body, changed))
+    }
+
+    /// Send `request` on a connection left open by an earlier one if there
+    /// is one, and on a new connection otherwise.
+    async fn exchange(&self, url: &Url, request: Request) -> Result<(Head, Body), Error> {
+        let origin: Origin = (
+            url.scheme().to_owned(),
+            url.host_str().ok_or(Error::NoHost)?.to_owned(),
+            url.port_or_known_default().ok_or(Error::NoHost)?,
+        );
+        let recycle = || -> Recycle {
+            let (idle, origin) = (self.idle.clone(), origin.clone());
+            Box::new(move |connection| idle.borrow_mut().put(origin, connection))
+        };
+
+        // A connection that sat unused may have been closed by the server in
+        // the meantime, which only shows when it is used. Browsers handle
+        // that by sending the request again on a new connection, and so do we.
+        let reused = self.idle.borrow_mut().take(&origin);
+        if let Some(connection) = reused {
+            match connection.send(request.clone(), Some(recycle())).await {
+                Ok(response) => return Ok(response),
+                Err(http::Error::Request(reason)) => return Err(http::Error::Request(reason).into()),
+                Err(_stale) => {}
+            }
+        }
+        let connection = http::connect(self.open(url).await?).await?;
+        Ok(connection.send(request, Some(recycle())).await?)
     }
 
     /// Open a WebSocket, offering `protocols`. The site's cookies are sent,
@@ -185,6 +250,8 @@ mod tests {
     /// echoing WebSocket on 8080.
     struct Device {
         acceptor: tokio_rustls::TlsAcceptor,
+        /// How many connections have been opened to it.
+        dials: std::cell::Cell<usize>,
     }
 
     impl Dialer for Device {
@@ -192,8 +259,26 @@ mod tests {
             if host != HOST {
                 return Err(io::Error::new(io::ErrorKind::NotFound, "no such device"));
             }
+            self.dials.set(self.dials.get() + 1);
             let (ours, theirs) = tokio::io::duplex(16 * 1024);
             match port {
+                // A server that answers once, promises nothing, and hangs up.
+                81 => {
+                    tokio::task::spawn_local(async move {
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        let mut theirs = theirs;
+                        let mut request = Vec::new();
+                        let mut piece = [0u8; 256];
+                        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                            match theirs.read(&mut piece).await {
+                                Ok(got) if got > 0 => request.extend_from_slice(&piece[..got]),
+                                _ => return,
+                            }
+                        }
+                        let _ = theirs.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+                        // Dropping `theirs` closes the connection without a word.
+                    });
+                }
                 80 => serve(theirs),
                 443 => {
                     let acceptor = self.acceptor.clone();
@@ -246,7 +331,7 @@ mod tests {
         let mut roots = RootCertStore::empty();
         roots.add(certificate).unwrap();
         Site::new(
-            Device { acceptor: tokio_rustls::TlsAcceptor::from(Arc::new(server)) },
+            Device { acceptor: tokio_rustls::TlsAcceptor::from(Arc::new(server)), dials: Default::default() },
             tls::config_trusting(roots),
         )
     }
@@ -282,7 +367,10 @@ mod tests {
         local(async {
             let trusted_elsewhere = device();
             // Same device, but checked against the real authorities.
-            let site = Site::new(Device { acceptor: trusted_elsewhere.dialer.acceptor.clone() }, tls::config());
+            let site = Site::new(
+                Device { acceptor: trusted_elsewhere.dialer.acceptor.clone(), dials: Default::default() },
+                tls::config(),
+            );
             let result = site.request(request("GET", &format!("https://{HOST}/echo"), &[], "")).await;
             assert!(matches!(result, Err(Error::Tls(_))));
         })
@@ -330,6 +418,86 @@ mod tests {
 
             let page = Url::parse(&format!("http://{HOST}/")).unwrap();
             assert_eq!(site.jar().borrow().script_cookies(&page), "a=1; ws=1");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn reuses_a_connection_once_its_response_has_been_read() {
+        local(async {
+            let site = device();
+            for scheme in ["http", "https"] {
+                let before = site.dialer.dials.get();
+                for _ in 0..3 {
+                    let (_, body, _) =
+                        site.request(request("GET", &format!("{scheme}://{HOST}/echo"), &[], "")).await.unwrap();
+                    text(body).await;
+                }
+                assert_eq!(site.dialer.dials.get() - before, 1, "{scheme}: three requests, one connection");
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn does_not_reuse_a_connection_with_an_unread_response() {
+        local(async {
+            let site = device();
+            let (_, unread, _) =
+                site.request(request("GET", &format!("http://{HOST}/echo"), &[], "")).await.unwrap();
+            let (_, body, _) =
+                site.request(request("GET", &format!("http://{HOST}/echo"), &[], "")).await.unwrap();
+            text(body).await;
+            drop(unread);
+            assert_eq!(site.dialer.dials.get(), 2);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sends_again_when_a_kept_connection_has_been_closed() {
+        local(async {
+            let site = device();
+            for _ in 0..2 {
+                let (head, body, _) =
+                    site.request(request("POST", &format!("http://{HOST}:81/"), &[], "data")).await.unwrap();
+                assert_eq!((head.status, text(body).await.as_str()), (200, "ok"));
+                // Let the server's side of the connection finish closing.
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(site.dialer.dials.get(), 2, "the second request needed a new connection");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpacks_gzip_it_asked_for() {
+        local(async {
+            let site = device();
+            let (head, body, _) =
+                site.request(request("GET", &format!("http://{HOST}/gzip"), &[], "")).await.unwrap();
+            assert!(!head.headers.iter().any(|(name, _)| name == "content-encoding" || name == "content-length"));
+            assert_eq!(text(body).await, "compressed ".repeat(500));
+            // And the connection is still good afterwards.
+            let (_, body, _) =
+                site.request(request("GET", &format!("http://{HOST}/echo"), &[], "")).await.unwrap();
+            assert!(text(body).await.starts_with("GET /echo"));
+            assert_eq!(site.dialer.dials.get(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn leaves_alone_an_encoding_the_page_chose() {
+        local(async {
+            let site = device();
+            let (head, mut body, _) = site
+                .request(request("GET", &format!("http://{HOST}/gzip"), &[("Accept-Encoding", "gzip")], ""))
+                .await
+                .unwrap();
+            assert!(head.headers.iter().any(|(name, value)| name == "content-encoding" && value == "gzip"));
+            let first = body.chunk().await.unwrap().unwrap();
+            assert_eq!(&first[..2], &[0x1f, 0x8b], "still gzip");
         })
         .await;
     }

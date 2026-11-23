@@ -52,6 +52,9 @@ use ts_transport::{DynEndpoint, OverlayTransportId, PeerId, UnderlayTransportId}
 
 use crate::{error::Error, relay::Relay};
 
+/// Send and receive buffer of each TCP connection, in bytes.
+const TCP_BUFFER: usize = 128 * 1024;
+
 /// The one TCP/IP stack in the tab.
 const STACK: OverlayTransportId = OverlayTransportId(0);
 
@@ -245,7 +248,13 @@ impl Inner {
 
 impl Engine {
     pub fn new(keys: NodeKeyPair) -> Self {
-        let config = StackConfig::default();
+        let config = StackConfig {
+            // How much of a download can be in flight at once. The default,
+            // 16 KB, means 16 KB per round trip through the relay, which is
+            // what made pages slow to load.
+            tcp_buffer_size: TCP_BUFFER,
+            ..StackConfig::default()
+        };
         let (ours, theirs) = WakingPipe::unbounded();
         let device = WakingPipeDev { pipe: ours, mtu: config.mtu, medium: smoltcp::phy::Medium::Ip };
         let mut stack = Netstack::with_clock(device, config, &stack_now);
