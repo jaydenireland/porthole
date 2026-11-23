@@ -10,12 +10,12 @@ oldest browser it can run in. Measured on the same Mac in Chrome (the test page 
 
 | | Go client | This client, so far |
 |---|---|---|
-| Download, compressed | 4.8 MB | about 0.65 MB |
-| Memory after start | 18 MB | 1.8 MB |
+| Download, compressed | 4.8 MB | about 1.1 MB |
+| Memory after start | 18 MB | about 2.5 MB |
 | Time to a sign-in address | about 1.2 s | 0.1 to 0.3 s |
 
-The Rust figures cover only what is built so far, and will grow as the rest
-is added.
+The Rust build now has every layer the Go one has, so the size should not
+grow much more. It has not been through a size optimizer yet.
 
 ## What works
 
@@ -29,6 +29,12 @@ is added.
   page proves this with two throwaway devices in the same tab: they meet at
   a relay, set up WireGuard, and one opens a TCP connection to the other,
   in about 1.2 s.
+- What pages use, checked the same way between the two devices: an HTTP
+  request, an HTTPS request with the certificate checked, a cookie kept and
+  sent back, and a WebSocket.
+- The calls the app's bridge makes on the Go client, with the same shapes:
+  `request`, `websocket`, `cookies`, `setCookie`, `exportCookies`,
+  `importCookies`.
 
 Written but not yet run against a real tailnet, because it needs a person to
 sign in:
@@ -46,13 +52,14 @@ In the order it needs doing:
 
 1. Checking the sign-in page against a real tailnet, and fixing what it
    turns up.
-2. TLS to `https://` tailnet sites (rustls), then HTTP, cookies and
-   WebSockets over that, with the same JavaScript API the Go build gives the
-   app (`request`, `websocket`, `cookies`, `setCookie`).
+2. Switching `web/app/` over: the Go client's `run`, `login` and `logout`
+   calls and its state callbacks have no equivalent here yet.
 3. Answering the control server's pings, reconnecting when the control
    connection or a relay drops, and signing out.
-4. Switching `web/app/` over, and building for the oldest browsers we can
-   reach.
+4. Speed: every request opens its own connection, and responses are not
+   compressed. The Go client reused connections and asked for gzip.
+5. Building for the oldest browsers we can reach, and running a size
+   optimizer.
 
 ## Build and test
 
@@ -64,8 +71,17 @@ RUN_TESTS=1 ./build.sh     # runs the tests first
 Then start the site (`../serve.py`) and open
 `http://localhost:8791/test/client-rs.html`. It connects to Tailscale's real
 control server and asks for a sign-in address. Then, with two throwaway
-devices, it passes a packet through a Tailscale relay and opens a TCP
-connection over WireGuard through it. None of this signs in.
+devices, it passes a packet through a Tailscale relay, opens a TCP
+connection over WireGuard through it, and makes HTTP, HTTPS and WebSocket
+requests over that. None of this signs in.
+
+`RUN_TESTS=1 ./build.sh` also runs 24 tests on this machine. They cover the
+parts that need no browser: HTTP, TLS, cookies and WebSockets against a
+small server inside the test, and the challenge handling.
+
+The build needs a clang that can compile for WebAssembly, for the C parts of
+the TLS crypto library. Apple's cannot; `brew install llvm` provides one and
+`build.sh` finds it.
 
 `/test/client-rs-signin.html` goes further and needs you: it shows the
 sign-in link, lists your devices and the relays, and lets you open a
@@ -79,7 +95,13 @@ and applies `tailscale-rs.patch`. After changing files there, run
 
 | File | Purpose |
 |---|---|
-| `src/tab.rs` | the API the page sees: `new Client(...)`, `state()`, `signInAddress()`, `waitForSignIn()`, `watch()`, `relays()`, and the diagnostics `tcpProbe()`, `relayCheck()` and `pathCheck()`. |
+| `src/tab.rs` | signing in and following the tailnet: `new Client(...)`, `state()`, `signInAddress()`, `waitForSignIn()`, `watch()`, `relays()`, `tcpProbe()`. |
+| `src/page.rs` | what pages use: `request()`, `websocket()`, `cookies()`, `setCookie()`, `exportCookies()`, `importCookies()`. |
+| `src/site.rs` | requests and WebSockets to a site: connect, add TLS, send, keep cookies. |
+| `src/http.rs` | one HTTP request over a connection, with the body read a piece at a time. |
+| `src/tls.rs` | TLS settings and certificate checking. |
+| `src/cookies.rs` | the cookie jar, with a browser's rules for scripts. |
+| `src/selftest.rs` | the checks the test page runs: `relayCheck()`, `pathCheck()`, `siteCheck()`. |
 | `src/control.rs` | the control server connection over a WebSocket. |
 | `src/engine.rs` | joins the TCP/IP stack, WireGuard and the relays, and runs them on the page's event loop. |
 | `src/netmap.rs` | the tab's picture of the tailnet, kept up to date from the control server's updates. |
@@ -98,6 +120,10 @@ Everything that is a protocol comes from a library:
   channel inside it, registration, the device-list stream, the relay
   protocol, WireGuard, packet routing, and the socket layer over smoltcp.
 - smoltcp (through tailscale-rs): TCP/IP.
+- rustls with ring: TLS and its cryptography. webpki-roots: Mozilla's list
+  of certificate authorities.
+- hyper: HTTP/1.1 to sites. tokio-tungstenite: WebSockets.
+- cookie_store: cookie matching rules. psl: the public suffix list.
 - hyper and h2 (through tailscale-rs): HTTP/2.
 - ws_stream_wasm: a WebSocket as a byte stream.
 - gloo-net: `fetch`.
