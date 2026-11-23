@@ -30,6 +30,8 @@ pub enum Error {
     Site(#[from] crate::site::Error),
     #[error("usage: {0}")]
     Usage(&'static str),
+    #[error("timed out {0}")]
+    TimedOut(&'static str),
 }
 
 impl From<Error> for JsValue {

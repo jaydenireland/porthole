@@ -9,7 +9,29 @@
 
 const STATE_ID = "rust";  // stored by the app as "ipn-state-rust"
 
+// How long to wait for other devices to be able to answer before letting
+// the user browse anyway. The client keeps trying in the background.
+const READY_WAIT_MS = 8000;
+
+// What the client has reported, newest last, for the app's "Details" panel.
+// The Rust code writes to the console; this keeps a copy.
+const log = [];
+function note(...parts) {
+  const seconds = (performance.now() / 1000).toFixed(1).padStart(6);
+  log.push(`${seconds}s  ${parts.map(String).join(" ").trim()}`);
+  if (log.length > 300) log.shift();
+}
+for (const level of ["debug", "log", "info", "warn", "error"]) {
+  const original = console[level].bind(console);
+  console[level] = (...args) => { note(...args); original(...args); };
+}
+
 export async function createIPN(config) {
+  note("loading the Rust client");
+  globalThis.__portholeClientCrashed = (message) => {
+    note("the client crashed:", message);
+    config.panicHandler?.(message);
+  };
   const { default: init, Client } = await import("/client/porthole_client.js");
   await init();
   config.onProgress?.(1);
@@ -25,14 +47,20 @@ export async function createIPN(config) {
   let loginWanted = false;    // the app asked for the address
   let stopped = false;
 
-  const state = (name) => { if (!stopped) callbacks?.notifyState(name); };
+  const state = (name) => {
+    if (stopped) return;
+    note("state:", name);
+    callbacks?.notifyState(name);
+  };
   const offerSignIn = () => {
     if (loginWanted && signInAddress) callbacks.notifyBrowseToURL(signInAddress);
   };
 
   async function start() {
     state("Starting");
+    note("connecting to the control server");
     const address = await client.signInAddress();
+    note(address === undefined || address === null ? "already signed in" : address ? "sign-in needed" : "waiting for an admin's approval");
     if (address !== undefined && address !== null) {
       if (address) {
         signInAddress = address;
@@ -43,30 +71,40 @@ export async function createIPN(config) {
       }
       await client.waitForSignIn(() => state("NeedsMachineAuth"));
       signInAddress = null;
+      note("signed in");
       state("Starting");
     }
 
     let running = false;
+    note("asking for the device list");
     await client.watch((devices) => {
       if (stopped) return;
       callbacks.notifyNetMap(devices);
-      // "Running" waits for the first device list and for other devices to
-      // know where to answer us.
+      // "Running" waits for the first device list and, for a while, for
+      // other devices to know where to answer us.
       if (!running) {
         running = true;
-        client.ready().then(() => state("Running"));
+        note("device list received; waiting for a home relay");
+        const waited = new Promise((resolve) => setTimeout(() => resolve("late"), READY_WAIT_MS));
+        Promise.race([client.ready().then(() => "ready"), waited]).then((how) => {
+          note(how === "ready" ? "other devices can answer" : "still no home relay; continuing, sites may not load yet");
+          state("Running");
+        });
       }
-    }, () => state("Stopped"));
+    }, () => { note("the control server stopped sending updates"); state("Stopped"); });
+    note("device list requested");
   }
 
   return {
     run(given) {
       callbacks = given;
       start().catch((error) => {
-        console.debug("[porthole] rust client stopped", error);
+        note("stopped:", error?.message ?? error);
         config.panicHandler?.(String(error?.message ?? error));
       });
     },
+    // Everything the client has reported so far, as text.
+    diagnostics: () => log.join("\n"),
     login() {
       loginWanted = true;
       offerSignIn();

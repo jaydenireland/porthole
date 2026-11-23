@@ -20,9 +20,39 @@ use crate::{
 };
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 
+/// How long one step of setting up the home relay may take before it is
+/// abandoned and tried again.
+const STEP_LIMIT_MS: u32 = 10_000;
+
+/// Resolves to `step`'s result, or to an error if it takes too long.
+async fn limited<T>(what: &'static str, step: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
+    use futures_util::future::{Either, select};
+    let limit = gloo_timers::future::TimeoutFuture::new(STEP_LIMIT_MS);
+    match select(std::pin::pin!(step), limit).await {
+        Either::Left((result, _)) => result,
+        Either::Right(_) => Err(Error::TimedOut(what)),
+    }
+}
+
+/// If this code crashes, everything in the tab that waits on it waits
+/// forever. Besides printing the crash to the console, tell the page, which
+/// can set `globalThis.__portholeClientCrashed` to a function to hear of it.
+fn report_crashes() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::panic::set_hook(Box::new(|crash| {
+            console_error_panic_hook::hook(crash);
+            let listener = js_sys::Reflect::get(&js_sys::global(), &"__portholeClientCrashed".into());
+            if let Ok(listener) = listener.and_then(|l| l.dyn_into::<js_sys::Function>()) {
+                let _ = listener.call1(&JsValue::NULL, &crash.to_string().into());
+            }
+        }));
+    });
+}
+
 #[wasm_bindgen(start)]
 fn start() {
-    console_error_panic_hook::set_once();
+    report_crashes();
     #[cfg(feature = "console-log")]
     {
         use tracing_subscriber::prelude::*;
@@ -101,11 +131,16 @@ impl Inner {
         if self.home_relay.get().is_none() && !relays.is_empty() {
             // Marked first so a second update does not start a second choice.
             self.home_relay.set(Some(0));
+            tracing::info!(devices = peers.len(), relays = relays.len(), "first picture of the tailnet received");
             let this = self.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Err(error) = this.choose_home_relay(&relays).await {
-                    tracing::warn!(%error, "could not set a home relay; other devices cannot answer yet");
-                    this.home_relay.set(None);
+                // Until this succeeds no other device can answer us, so keep
+                // trying, a little less often each time.
+                let mut wait_ms = 1000;
+                while let Err(error) = this.choose_home_relay(&relays).await {
+                    tracing::warn!(%error, wait_ms, "could not set a home relay; other devices cannot answer yet");
+                    gloo_timers::future::TimeoutFuture::new(wait_ms).await;
+                    wait_ms = (wait_ms * 2).min(15_000);
                 }
             });
         }
@@ -119,10 +154,16 @@ impl Inner {
     ) -> Result<(), Error> {
         let region = relay::nearest(relays)
             .await
-            .ok_or_else(|| Error::Relay("no relay answered".into()))?;
-        self.net.engine.listen_on(region).await?;
+            .ok_or_else(|| Error::Relay("the control server listed no relays".into()))?;
+        tracing::info!(region, host = relays.get(&region).map(String::as_str), "nearest relay chosen");
+        limited("connecting to the home relay", self.net.engine.listen_on(region)).await?;
+        tracing::info!(region, "connected to the home relay");
         let connection = self.connection().await?;
-        connection.set_home_relay(&self.config, &self.keys, region).await?;
+        limited(
+            "telling the control server our home relay",
+            connection.set_home_relay(&self.config, &self.keys, region),
+        )
+        .await?;
         self.home_relay.set(Some(region));
         tracing::info!(region, "home relay set");
         for waiter in self.ready_waiters.borrow_mut().drain(..) {

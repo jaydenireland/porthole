@@ -69,10 +69,17 @@ pub async fn check(host: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// How long to wait for the quickest relay to answer a probe.
+const PROBE_LIMIT_MS: u32 = 4000;
+
 /// Picks the relay region that answers first from this browser, which is the
 /// one other devices should use to reach us. `hosts` maps region numbers to
-/// host names.
+/// host names. If no probe is answered in time (something on the device may
+/// block them), falls back to the lowest-numbered region: any relay works,
+/// a far one is only slower.
 pub async fn nearest(hosts: &std::collections::HashMap<u32, String>) -> Option<u32> {
+    use futures_util::future::{Either, select, select_ok};
+    let fallback = hosts.keys().min().copied()?;
     let probes = hosts.iter().map(|(region, host)| {
         let (region, url) = (*region, format!("https://{host}/derp/latency-check"));
         Box::pin(async move {
@@ -85,6 +92,16 @@ pub async fn nearest(hosts: &std::collections::HashMap<u32, String>) -> Option<u
                 .map(|_| region)
         })
     });
-    let (region, _slower) = futures_util::future::select_ok(probes).await.ok()?;
-    Some(region)
+    let limit = gloo_timers::future::TimeoutFuture::new(PROBE_LIMIT_MS);
+    match select(select_ok(probes), limit).await {
+        Either::Left((Ok((region, _slower)), _)) => Some(region),
+        Either::Left((Err(error), _)) => {
+            tracing::warn!(%error, fallback, "no relay answered a probe");
+            Some(fallback)
+        }
+        Either::Right(_) => {
+            tracing::warn!(fallback, "no relay answered a probe in time");
+            Some(fallback)
+        }
+    }
 }

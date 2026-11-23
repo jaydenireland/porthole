@@ -63,6 +63,13 @@
   .stay { display: flex; justify-content: center; align-items: center; gap: 8px; margin-top: 18px; font-size: 14.5px; cursor: pointer; }
   .stay input { width: 16px; height: 16px; flex: none; accent-color: var(--accent); }
   .stay-help { margin-top: 8px; }
+  #details { max-width: 620px; margin: 18px auto 0; color: var(--muted); font-size: 14px; }
+  #details summary { cursor: pointer; padding: 8px 2px; }
+  #details .btn { padding: 6px 12px; font-size: 14px; margin-top: 8px; }
+  #detailsLog {
+    margin: 10px 0 0; padding: 12px; max-height: 50vh; overflow: auto; white-space: pre-wrap; word-break: break-word;
+    font: 12px/1.45 var(--mono); color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  }
 
   .progress { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; margin-top: 20px; }
   .progress i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width .15s; }
@@ -235,6 +242,13 @@
       <p class="lede" id="stoppedText">The connection to your tailnet ended.</p>
       <button class="btn primary" id="restart">Reload</button>
     </section>
+
+    <details id="details" hidden>
+      <summary>Details</summary>
+      <p class="fine">What the Rust client has reported. It may include the names of your devices.</p>
+      <button class="btn" id="detailsCopy" type="button">Copy</button>
+      <pre id="detailsLog"></pre>
+    </details>
 
     <section class="view" id="viewDevices" hidden>
       <div class="devices-head">
@@ -746,6 +760,17 @@ async function start() {
     return;
   }
   restoreCookies();
+  // The Rust client keeps a log; show it under a "Details" fold, since on a
+  // phone there is no console to look at.
+  if (ipn.diagnostics) {
+    $("details").hidden = false;
+    const refresh = () => { if ($("details").open) $("detailsLog").textContent = ipn.diagnostics(); };
+    $("details").addEventListener("toggle", refresh);
+    setInterval(refresh, 1000);
+    $("detailsCopy").addEventListener("click", () => {
+      navigator.clipboard.writeText(ipn.diagnostics()).then(() => { $("detailsCopy").textContent = "Copied"; });
+    });
+  }
   ipn.run({
     notifyState: setState,
     notifyNetMap: renderNetMap,
