@@ -22,7 +22,7 @@ if (reporting) {
   addEventListener("unhandledrejection", (ev) => stage("unhandled rejection: " + (ev.reason?.message ?? ev.reason)));
 }
 try {
-  const { default: init, Client, relayCheck, pathCheck, siteCheck, pairedClient } = await import("/client/porthole_client.js");
+  const { default: init, Client, relayCheck, pathCheck, siteCheck, pairedClient, netmapCheck } = await import("/client/porthole_client.js");
   const wasm = await init();
   out.loadedMs = ms();
   stage("loaded");
@@ -36,6 +36,15 @@ try {
   out.signInAddressMs = ms();
   stage("sign-in address");
   out.gotSignInAddress = /^https:\/\/login\.tailscale\.com\//.test(address ?? "");
+  // A made-up device list goes through the code a real one takes.
+  const devices = JSON.parse(await netmapCheck());
+  const seen = devices.peers.map((p) => `${p.name.split(".")[0]}:${p.online}`).sort().join(" ");
+  if (devices.self.name !== "porthole.tail1234.ts.net." || devices.self.addresses[0] !== "100.64.0.1" || seen !== "laptop:false nas:true phone:false pi:false") {
+    throw new Error("device list: got " + JSON.stringify(devices));
+  }
+  out.deviceListOk = true;
+  stage("device list");
+
   // Two throwaway devices pass a packet through one of Tailscale's relays.
   const relayStart = ms();
   await Promise.race([
@@ -147,7 +156,7 @@ try {
   out.frameOk = true;
   paired.free();
   out.wasmMemoryMB = Math.round(wasm.memory.buffer.byteLength / 1048576 * 10) / 10;
-  out.ok = out.gotSignInAddress === true && out.relayOk === true && out.pathOk === true && out.siteOk === true && out.apiOk === true && out.frameOk === true;
+  out.ok = out.gotSignInAddress === true && out.deviceListOk === true && out.relayOk === true && out.pathOk === true && out.siteOk === true && out.apiOk === true && out.frameOk === true;
 } catch (e) {
   out.ok = false;
   out.error = String(e && e.message || e);

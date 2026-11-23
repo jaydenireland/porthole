@@ -93,6 +93,54 @@ pub async fn path(relay: &str) -> Result<(), Error> {
     served.and(answered)
 }
 
+/// The device list: feeds an update shaped like the control server's through
+/// the same code a real one takes, and returns what the page would be shown.
+/// The devices are in the states a real tailnet has them in: online, offline
+/// with and without a last-seen time, and unknown.
+pub async fn netmap() -> Result<String, Error> {
+    use ts_keys::{DiscoKeyPair, MachineKeyPair};
+
+    let device = |id: u32, name: &str, extra: &str| {
+        format!(
+            r#"{{"ID":{id},"StableID":"n{id}","Name":"{name}.tail1234.ts.net.","Key":"{}","Machine":"{}","DiscoKey":"{}","Addresses":["100.64.0.{id}/32","fd7a:115c:a1e0::{id}/128"],"AllowedIPs":["100.64.0.{id}/32","fd7a:115c:a1e0::{id}/128"],"HomeDERP":1,"Cap":130,"MachineAuthorized":true,"Created":"2026-01-01T00:00:00Z"{extra}}}"#,
+            NodeKeyPair::random().public,
+            MachineKeyPair::random().public,
+            DiscoKeyPair::random().public,
+        )
+    };
+    let update = format!(
+        r#"{{"Node":{},"Peers":[{},{},{},{}],"DERPMap":{{"Regions":{{"1":{{"RegionID":1,"RegionCode":"nyc","RegionName":"New York City","Nodes":[{{"Name":"1f","RegionID":1,"HostName":"derp1.tailscale.com"}}]}}}}}},"PacketFilter":[{{"SrcIPs":["*"],"DstPorts":[{{"IP":"*","Ports":{{"First":0,"Last":65535}}}}]}}],"Domain":"example.com"}}"#,
+        device(1, "porthole", r#","Online":true"#),
+        device(2, "nas", r#","Online":true"#),
+        device(3, "laptop", r#","Online":false"#),
+        device(4, "phone", r#","Online":false,"LastSeen":"2026-11-01T12:00:00Z""#),
+        device(5, "pi", ""),
+    );
+    // Parsed once directly, so a mistake in the update above is reported
+    // with its reason instead of as a silent end of the stream.
+    serde_json::from_str::<ts_control_serde::MapResponse>(&update)
+        .map_err(|e| Error::Netmap(format!("the test update does not parse: {e}")))?;
+
+    let mut framed = (update.len() as u32).to_le_bytes().to_vec();
+    framed.extend_from_slice(update.as_bytes());
+    let mut updates = std::pin::pin!(ts_control::client::map_stream(io::Cursor::new(framed)));
+    let first = updates.next().await.ok_or_else(|| failed("the update produced nothing"))?;
+
+    let mut netmap = crate::netmap::Netmap::default();
+    netmap.apply(first);
+    // Everything the client does with a device list, on an engine of its own.
+    let engine = Engine::new(NodeKeyPair::random());
+    engine.set_relays(netmap.relay_hosts());
+    engine.set_peers(&netmap.engine_peers());
+    engine
+        .set_addresses(netmap.addresses().ok_or_else(|| failed("the update had no addresses for this device"))?)
+        .await?;
+    if netmap.resolve("nas").is_none() || netmap.resolve("NAS.tail1234.ts.net").is_none() {
+        return Err(failed("a device could not be found by name"));
+    }
+    netmap.to_json().ok_or_else(|| failed("there was no device list to show"))
+}
+
 /// Reaches the second device whatever name is asked for.
 struct Direct {
     engine: Rc<Engine>,

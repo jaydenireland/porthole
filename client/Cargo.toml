@@ -56,7 +56,9 @@ ts_http_util = { path = "../tailscale-rs-src/crates/utils/ts_http_util" }
 ts_keys = { path = "../tailscale-rs-src/crates/utils/ts_keys", features = ["serde"] }
 
 # Browser bindings.
-chrono = { version = "0.4", default-features = false }
+# "wasmbind" makes chrono read the page's clock; without it, the first
+# device list crashes the client (tailscale-rs asks chrono for the time).
+chrono = { version = "0.4", default-features = false, features = ["clock", "wasmbind"] }
 console_error_panic_hook = "0.1"
 gloo-timers = { version = "0.3", features = ["futures"] }
 gloo-net = { version = "0.6", default-features = false, features = ["http"] }

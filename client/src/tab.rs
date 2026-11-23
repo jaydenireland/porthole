@@ -458,6 +458,14 @@ pub async fn paired_client(host: String) -> Result<Client, Error> {
     crate::selftest::paired_client(&host).await
 }
 
+/// Diagnostic: resolves to the device list, as JSON, that a made-up update
+/// from the control server produces. It takes the path a real update takes.
+#[cfg(feature = "diagnostics")]
+#[wasm_bindgen(js_name = netmapCheck)]
+pub async fn netmap_check() -> Result<String, Error> {
+    crate::selftest::netmap().await
+}
+
 /// Diagnostic: resolves if this browser can pass a packet through the relay
 /// at `host` (for example `derp1.tailscale.com`). Needs no sign-in.
 #[cfg(feature = "diagnostics")]
