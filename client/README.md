@@ -178,7 +178,7 @@ reason it also does not apply the tailnet's access rules to arriving packets;
 tailscale-rs supports Linux, macOS and Windows. It has no browser build, and
 an upstream request for one
 ([issue 497](https://github.com/tailscale/tailscale-rs/issues/497)) was closed
-without a change. The patch is small (24 files) and does six things. The
+without a change. The patch is small (24 files) and does seven things. The
 first three apply only when building for `wasm32-unknown-unknown`:
 
 - stops four crates asking for tokio's thread pool, which does not exist in
@@ -189,6 +189,8 @@ first three apply only when building for `wasm32-unknown-unknown`:
 - reads the clock through the `web-time` crate, because the standard
   library's clock panics in a browser (natively it is the same clock);
 - lets `ts_dataplane` be built without its tokio wrapper;
+- tells the HTTP/2 library to keep no record of abandoned responses, since
+  keeping one makes it read a clock that browsers do not have;
 - makes TCP sockets send and acknowledge at once instead of waiting briefly
   to batch, which suits request-and-answer traffic over a relay and needs
   fewer timers.

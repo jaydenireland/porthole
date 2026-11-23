@@ -439,7 +439,7 @@ index de44cb1..3029d0a 100644
  where
      B: Body + Send + 'static,
 diff --git a/crates/utils/ts_http_util/src/http2.rs b/crates/utils/ts_http_util/src/http2.rs
-index d2642b6..5213b44 100644
+index d2642b6..63ef0e5 100644
 --- a/crates/utils/ts_http_util/src/http2.rs
 +++ b/crates/utils/ts_http_util/src/http2.rs
 @@ -10,14 +10,13 @@ use hyper::{
@@ -468,12 +468,21 @@ index d2642b6..5213b44 100644
  }
  
  impl<B> Client<B> for Http2<B>
-@@ -65,16 +64,14 @@ where
+@@ -64,17 +63,22 @@ where
+     B::Data: Send,
      B::Error: core::error::Error + Send + Sync + 'static,
  {
-     let (client, conn) =
+-    let (client, conn) =
 -        hyper::client::conn::http2::handshake(TokioExecutor::new(), WithHyperIo::new(io))
-+        hyper::client::conn::http2::handshake(rt::executor(), WithHyperIo::new(io))
++    let mut builder = hyper::client::conn::http2::Builder::new(rt::executor());
++    // When a response is abandoned unread, the HTTP/2 library notes the time
++    // so it can forget the stream a little later. It reads the standard
++    // library's clock to do so, which panics in a browser. Telling it to
++    // keep no such streams means it never looks at the clock.
++    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
++    builder.max_concurrent_reset_streams(0);
++    let (client, conn) = builder
++            .handshake(WithHyperIo::new(io))
              .await
              .inspect_err(|e| {
                  tracing::error!(error = %e, "http2 handshake");
@@ -487,7 +496,7 @@ index d2642b6..5213b44 100644
          if let Err(e) = conn.await {
              tracing::error!(?e, "error in http/2 connection; closing connection");
          }
-@@ -89,6 +86,7 @@ where
+@@ -89,6 +93,7 @@ where
  }
  
  /// Establish an HTTP/2 connection to the server at the given `url` over plaintext TCP.
@@ -495,7 +504,7 @@ index d2642b6..5213b44 100644
  pub async fn connect_tcp<B>(url: &url::Url) -> Result<Http2<B>, Error>
  where
      B: Body + Send + Unpin + 'static,
-@@ -100,6 +98,7 @@ where
+@@ -100,6 +105,7 @@ where
  }
  
  /// Establish an HTTP/2 connection to the server at the given `url` over encrypted TLS.

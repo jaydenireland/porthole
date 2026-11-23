@@ -530,6 +530,20 @@ pub async fn netmap_check() -> Result<String, Error> {
     crate::selftest::netmap().await
 }
 
+/// Diagnostic: resolves if a response from the control server can be
+/// abandoned unread without harm, and the connection used again after.
+#[cfg(feature = "diagnostics")]
+#[wasm_bindgen(js_name = abandonCheck)]
+pub async fn abandon_check() -> Result<(), Error> {
+    let client = Client::new("porthole-test".to_owned(), true, None, None)?;
+    let connection = client.inner.connection().await?;
+    connection.abandon_a_response(&client.inner.config).await?;
+    // Give the connection's own task a turn, then use it again.
+    crate::timer::sleep_ms(50).await;
+    connection.abandon_a_response(&client.inner.config).await?;
+    Ok(())
+}
+
 /// Diagnostic: resolves if two throwaway devices can talk again after both
 /// lose their relay connections. Needs no sign-in.
 #[cfg(feature = "diagnostics")]

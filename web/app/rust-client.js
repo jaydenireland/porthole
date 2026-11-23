@@ -111,11 +111,17 @@ export async function createIPN(config) {
     },
     logout() {
       // The app waits for "NeedsLogin", then deletes the keys and reloads.
-      const done = () => { state("NeedsLogin"); stopped = true; };
-      client.signOut().then(done, (error) => {
-        console.debug("[porthole] sign-out did not reach the control server", error);
-        done();
-      });
+      let finished = false;
+      const done = (how) => {
+        if (finished) return;
+        finished = true;
+        note("sign-out:", how);
+        state("NeedsLogin");
+        stopped = true;
+      };
+      client.signOut().then(() => done("done"), (error) => done("did not reach the control server: " + (error?.message ?? error)));
+      // The keys are deleted either way, so do not keep the user waiting.
+      setTimeout(() => done("no answer yet; continuing"), 2500);
     },
     request: (options) => client.request(options),
     websocket: (options) => client.websocket(options),

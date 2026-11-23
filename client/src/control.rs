@@ -185,10 +185,32 @@ impl Connection {
             .post(&url, None, bytes::Bytes::from(body).into())
             .await
             .map_err(|e| Error::Registration(e.to_string()))?;
-        if !response.status().is_success() {
-            return Err(Error::Registration(format!("sign-out was refused ({})", response.status())));
+        let status = response.status();
+        // Read the answer to the end, so the connection is left tidy.
+        let _ = ts_http_util::ResponseExt::collect_bytes(response).await;
+        if !status.is_success() {
+            return Err(Error::Registration(format!("sign-out was refused ({status})")));
         }
         Ok(())
+    }
+
+    /// For the checks: make a request and walk away from the answer without
+    /// reading it, which is what cancelling a request does. The HTTP/2
+    /// library once crashed the client at this point.
+    #[cfg(feature = "diagnostics")]
+    pub async fn abandon_a_response(&self, config: &Config) -> Result<u16, Error> {
+        use ts_http_util::ClientExt;
+        // Not a valid registration, so the server answers with an error and
+        // an explanation, and nothing is registered.
+        let url = config.server_url.join("machine/register")?;
+        let response = self
+            .http
+            .post(&url, None, bytes::Bytes::from_static(b"{}").into())
+            .await
+            .map_err(|e| Error::Connection(e.to_string()))?;
+        let status = response.status().as_u16();
+        drop(response);
+        Ok(status)
     }
 
     /// Tell the control server which relay region other devices should use to
