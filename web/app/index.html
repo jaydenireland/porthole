@@ -363,6 +363,7 @@ let disconnecting = false;  // signing out, or wiping stored keys before a reloa
 // start the client. Tabs can share one identity, and two running clients
 // with the same identity would knock each other offline.
 const parked = new URLSearchParams(location.search).has("parked");
+const useRustClient = new URLSearchParams(location.search).get("client") === "rust";
 
 // The logins to tailnet sites themselves (their cookies) are held by the
 // client in memory, so they are saved alongside the keys:
@@ -725,7 +726,10 @@ async function start() {
   }
   removeAppWorker();
   try {
-    ipn = await createIPN({
+    // ?client=rust tries the Rust build of the client (see /client/README.md).
+    const create = useRustClient ? (await import("./rust-client.js")).createIPN : createIPN;
+    debug("client", useRustClient ? "rust" : "go");
+    ipn = await create({
       wasmURL: "/node/main.wasm",
       hostname: "porthole",
       stateStorage,

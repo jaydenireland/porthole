@@ -18,6 +18,7 @@ component.
 | `__tailnet/relay.html` | hidden page on each site's subdomain; installs the worker there and passes its requests up to the app. |
 | `__tailnet/page.js` | added to every tailnet page by the worker; routes `WebSocket` and `document.cookie` through the client. |
 | `node/main.wasm`, `node/wasm_exec.js` | the built client and Go's loader. |
+| `app/rust-client.js` | lets the app run on the Rust client in `/client` when opened with `?client=rust`. |
 | `tsconnect.patch` | our changes to Tailscale's `cmd/tsconnect/wasm`. |
 | `make-patch.sh` | rewrites `tsconnect.patch` from the changes in the Tailscale checkout. |
 | `build.sh` | rebuilds `node/` from a patched Tailscale checkout. |

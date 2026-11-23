@@ -144,6 +144,46 @@ index c2515ec..3c90bda 100644
  rand.workspace = true
  proptest.workspace = true
  
+diff --git a/crates/net/overlay/ts_netstack_smoltcp/src/netcore/socket_impl/tcp/listener.rs b/crates/net/overlay/ts_netstack_smoltcp/src/netcore/socket_impl/tcp/listener.rs
+index 211d28a..b19e51b 100644
+--- a/crates/net/overlay/ts_netstack_smoltcp/src/netcore/socket_impl/tcp/listener.rs
++++ b/crates/net/overlay/ts_netstack_smoltcp/src/netcore/socket_impl/tcp/listener.rs
+@@ -74,6 +74,9 @@ impl Netstack {
+         match cmd {
+             TcpListenCommand::Listen { local_endpoint } => {
+                 let mut listener = tcp::Socket::new(self.tcp_buffer(), self.tcp_buffer());
++                // See the note where connecting sockets are made.
++                listener.set_nagle_enabled(false);
++                listener.set_ack_delay(None);
+ 
+                 if let Err(e) = listener.listen(local_endpoint) {
+                     return Response::Error(e.into());
+@@ -297,6 +300,8 @@ impl Netstack {
+                 tcp::SocketBuffer::new(vec![0; self.config.tcp_buffer_size]),
+                 tcp::SocketBuffer::new(vec![0; self.config.tcp_buffer_size]),
+             );
++            new_listener.set_nagle_enabled(false);
++            new_listener.set_ack_delay(None);
+ 
+             if let Err(e) = new_listener.listen(listener.local_endpoint) {
+                 // invariant failure: the only variants for ListenError are
+diff --git a/crates/net/overlay/ts_netstack_smoltcp/src/netcore/socket_impl/tcp/stream.rs b/crates/net/overlay/ts_netstack_smoltcp/src/netcore/socket_impl/tcp/stream.rs
+index 76c2f2e..c492048 100644
+--- a/crates/net/overlay/ts_netstack_smoltcp/src/netcore/socket_impl/tcp/stream.rs
++++ b/crates/net/overlay/ts_netstack_smoltcp/src/netcore/socket_impl/tcp/stream.rs
+@@ -38,6 +38,12 @@ impl Netstack {
+                 }
+ 
+                 let mut sock = tcp::Socket::new(self.tcp_buffer(), self.tcp_buffer());
++                // Send small writes at once and acknowledge at once. smoltcp's
++                // defaults wait briefly to batch both, which costs a timer
++                // each time; browsers slow timers down in tabs that are not
++                // visible, which turned those short waits into stalls.
++                sock.set_nagle_enabled(false);
++                sock.set_ack_delay(None);
+ 
+                 if let Err(e) = sock.connect(self.iface.context(), remote_endpoint, local_endpoint)
+                 {
 diff --git a/crates/net/protocol/ts_tunnel/src/endpoint.rs b/crates/net/protocol/ts_tunnel/src/endpoint.rs
 index d32241d..a7ef3b8 100644
 --- a/crates/net/protocol/ts_tunnel/src/endpoint.rs

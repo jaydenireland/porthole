@@ -1610,6 +1610,7 @@ name = "porthole-client"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "chrono",
  "console_error_panic_hook",
  "cookie",
  "cookie_store",
@@ -1644,6 +1645,7 @@ dependencies = [
  "ts_capabilityversion",
  "ts_control",
  "ts_control_noise",
+ "ts_control_serde",
  "ts_dataplane",
  "ts_derp",
  "ts_http_util",

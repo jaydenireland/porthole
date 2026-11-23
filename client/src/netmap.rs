@@ -20,6 +20,9 @@ pub struct Netmap {
     /// number the same for as long as we know it.
     numbers: HashMap<NodeId, u32>,
     next_number: u32,
+    /// Names the checks give to devices that are in no tailnet.
+    #[cfg(feature = "diagnostics")]
+    aliases: HashMap<String, IpAddr>,
 }
 
 impl Netmap {
@@ -102,6 +105,12 @@ impl Netmap {
         peers
     }
 
+    /// Give a device outside any tailnet a name, for the checks.
+    #[cfg(feature = "diagnostics")]
+    pub fn alias(&mut self, name: &str, address: IpAddr) {
+        self.aliases.insert(name.to_ascii_lowercase(), address);
+    }
+
     /// The tailnet address of the device called `name`: a short name
     /// (`nas`), a full one (`nas.tail1234.ts.net`), or an address already.
     pub fn resolve(&self, name: &str) -> Option<IpAddr> {
@@ -109,6 +118,10 @@ impl Netmap {
             return Some(address);
         }
         let name = name.to_ascii_lowercase();
+        #[cfg(feature = "diagnostics")]
+        if let Some(address) = self.aliases.get(&name) {
+            return Some(*address);
+        }
         self.peers
             .values()
             .chain(self.me.as_ref())

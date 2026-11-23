@@ -2,7 +2,8 @@
 
 A replacement for the Go Tailscale client in `web/node/`, built on Tailscale's
 own Rust crates, [tailscale-rs](https://github.com/tailscale/tailscale-rs).
-The app does not use it yet.
+The app uses the Go client unless it is opened with `?client=rust`, for
+example `http://localhost:8791/app/?client=rust`.
 
 The reasons for it are size and reach. The Go client is a 30 MB download that
 needs 18 MB of memory before it does anything, and Go's compiler sets the
@@ -34,7 +35,11 @@ grow much more. It has not been through a size optimizer yet.
   sent back, and a WebSocket.
 - The calls the app's bridge makes on the Go client, with the same shapes:
   `request`, `websocket`, `cookies`, `setCookie`, `exportCookies`,
-  `importCookies`.
+  `importCookies`. The test page calls them from JavaScript, and then uses
+  the app's real bridge and service worker to show a page from the second
+  device in a frame.
+- The app itself, up to the sign-in screen, through `web/app/rust-client.js`,
+  which gives the Rust client the Go client's interface.
 
 Written but not yet run against a real tailnet, because it needs a person to
 sign in:
@@ -43,21 +48,29 @@ sign in:
 - Choosing the nearest relay and telling the control server, so other
   devices can answer.
 - Opening a TCP connection to a real device by name.
+- Everything the app does after sign-in, including waiting for an admin's
+  approval and signing out.
 
-Open `/test/client-rs-signin.html` to try all three.
+Open `/test/client-rs-signin.html` to try the first three, and the app with
+`?client=rust` for the rest.
+
+Safari passed every check up to the JavaScript calls, and then became
+unreliable: the checks were run in hidden tabs, which Safari slows down, and
+many were left open at once. The frame check has only passed in Chrome. A
+run in one visible Safari tab would settle it.
 
 ## What is left
 
 In the order it needs doing:
 
-1. Checking the sign-in page against a real tailnet, and fixing what it
-   turns up.
-2. Switching `web/app/` over: the Go client's `run`, `login` and `logout`
-   calls and its state callbacks have no equivalent here yet.
-3. Answering the control server's pings, reconnecting when the control
-   connection or a relay drops, and signing out.
-4. Speed: every request opens its own connection, and responses are not
+1. Running the app with `?client=rust` against a real tailnet, and fixing
+   what it turns up.
+2. Answering the control server's pings, and reconnecting when the control
+   connection or a relay drops. Today the app shows "Porthole stopped".
+3. Speed: every request opens its own connection, and responses are not
    compressed. The Go client reused connections and asked for gzip.
+4. Timers: the TCP stack and WireGuard rely on the page's timers, which
+   browsers slow down in hidden tabs. The Go client has the same weakness.
 5. Building for the oldest browsers we can reach, and running a size
    optimizer.
 
@@ -101,7 +114,8 @@ and applies `tailscale-rs.patch`. After changing files there, run
 | `src/http.rs` | one HTTP request over a connection, with the body read a piece at a time. |
 | `src/tls.rs` | TLS settings and certificate checking. |
 | `src/cookies.rs` | the cookie jar, with a browser's rules for scripts. |
-| `src/selftest.rs` | the checks the test page runs: `relayCheck()`, `pathCheck()`, `siteCheck()`. |
+| `src/selftest.rs` | the checks the test page runs: `relayCheck()`, `pathCheck()`, `siteCheck()`, `pairedClient()`. |
+| `../web/app/rust-client.js` | gives this client the Go client's interface, for the app. |
 | `src/control.rs` | the control server connection over a WebSocket. |
 | `src/engine.rs` | joins the TCP/IP stack, WireGuard and the relays, and runs them on the page's event loop. |
 | `src/netmap.rs` | the tab's picture of the tailnet, kept up to date from the control server's updates. |
@@ -147,7 +161,7 @@ reason it also does not apply the tailnet's access rules to arriving packets;
 tailscale-rs supports Linux, macOS and Windows. It has no browser build, and
 an upstream request for one
 ([issue 497](https://github.com/tailscale/tailscale-rs/issues/497)) was closed
-without a change. The patch is small (22 files) and does five things. The
+without a change. The patch is small (24 files) and does six things. The
 first three apply only when building for `wasm32-unknown-unknown`:
 
 - stops four crates asking for tokio's thread pool, which does not exist in
@@ -157,7 +171,10 @@ first three apply only when building for `wasm32-unknown-unknown`:
   since the page supplies the connection and the name;
 - reads the clock through the `web-time` crate, because the standard
   library's clock panics in a browser (natively it is the same clock);
-- lets `ts_dataplane` be built without its tokio wrapper.
+- lets `ts_dataplane` be built without its tokio wrapper;
+- makes TCP sockets send and acknowledge at once instead of waiting briefly
+  to batch, which suits request-and-answer traffic over a relay and needs
+  fewer timers.
 
 Native builds of the patched crates still compile unchanged
 (`cargo check -p ts_runtime` in the checkout).

@@ -41,6 +41,8 @@ pub enum Registration {
     Authorized,
     /// Someone has to sign in at this address first.
     NeedsSignIn(Url),
+    /// Signed in, but an admin of the tailnet has to approve the device.
+    NeedsApproval,
 }
 
 #[derive(Deserialize)]
@@ -132,8 +134,40 @@ impl Connection {
             Err(RegistrationError::MachineNotAuthorized(Some(url))) => {
                 Ok(Registration::NeedsSignIn(url))
             }
+            Err(RegistrationError::MachineNotAuthorized(None)) => Ok(Registration::NeedsApproval),
             Err(e) => Err(Error::Registration(e.to_string())),
         }
+    }
+
+    /// Sign this device out: the control server stops accepting its key, and
+    /// removes the device if it is a temporary one.
+    ///
+    /// tailscale-rs has no call for this. It is a registration request that
+    /// asks for the key to have expired already, which is how Tailscale's
+    /// own clients sign out.
+    pub async fn sign_out(&self, config: &Config, keys: &NodeState) -> Result<(), Error> {
+        use ts_http_util::ClientExt;
+        let request = ts_control_serde::RegisterRequest {
+            version: CapabilityVersion::CURRENT,
+            node_key: keys.node_keys.public,
+            expiry: chrono::DateTime::from_timestamp(123, 0),
+            hostinfo: ts_control_serde::HostInfo {
+                hostname: config.hostname.as_deref(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let body = serde_json::to_vec(&request).map_err(|e| Error::Registration(e.to_string()))?;
+        let url = config.server_url.join("machine/register")?;
+        let response = self
+            .http
+            .post(&url, None, bytes::Bytes::from(body).into())
+            .await
+            .map_err(|e| Error::Registration(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(Error::Registration(format!("sign-out was refused ({})", response.status())));
+        }
+        Ok(())
     }
 
     /// Tell the control server which relay region other devices should use to

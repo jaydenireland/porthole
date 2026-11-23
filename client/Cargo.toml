@@ -43,6 +43,7 @@ webpki-roots = "1"
 ts_capabilityversion = { path = "../tailscale-rs-src/crates/capabilities/ts_capabilityversion" }
 ts_control = { path = "../tailscale-rs-src/crates/control_plane/ts_control" }
 ts_control_noise = { path = "../tailscale-rs-src/crates/control_plane/ts_control_noise" }
+ts_control_serde = { path = "../tailscale-rs-src/crates/control_plane/ts_control_serde" }
 ts_bart = { path = "../tailscale-rs-src/crates/data_structures/ts_bart" }
 ts_dataplane = { path = "../tailscale-rs-src/crates/net/ts_dataplane", default-features = false }
 ts_derp = { path = "../tailscale-rs-src/crates/net/underlay/ts_derp" }
@@ -55,6 +56,7 @@ ts_http_util = { path = "../tailscale-rs-src/crates/utils/ts_http_util" }
 ts_keys = { path = "../tailscale-rs-src/crates/utils/ts_keys", features = ["serde"] }
 
 # Browser bindings.
+chrono = { version = "0.4", default-features = false }
 console_error_panic_hook = "0.1"
 gloo-timers = { version = "0.3", features = ["futures"] }
 gloo-net = { version = "0.6", default-features = false, features = ["http"] }

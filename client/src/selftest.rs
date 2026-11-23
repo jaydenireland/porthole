@@ -30,7 +30,7 @@ const NAME: &str = "device-b.test";
 
 /// Two devices that know each other and are both connected to the relay.
 struct Pair {
-    a: Rc<Engine>,
+    a: Engine,
     b: Engine,
     address_b: IpAddr,
 }
@@ -58,7 +58,7 @@ async fn pair(relay: &str) -> Result<Pair, Error> {
         engine.set_peers(&[other]);
         engine.listen_on(REGION).await?;
     }
-    Ok(Pair { a: Rc::new(a), b, address_b })
+    Ok(Pair { a, b, address_b })
 }
 
 fn failed(what: &str) -> Error {
@@ -140,7 +140,7 @@ impl Servers {
 }
 
 /// The smallest web server: answers any request with `hello`, sets a cookie,
-/// and says whether that cookie came back.
+/// and says whether that cookie came back. `/page` is an HTML page.
 async fn answer(mut stream: impl AsyncRead + AsyncWrite + Unpin) {
     let mut request = Vec::new();
     let mut piece = [0u8; 512];
@@ -151,13 +151,46 @@ async fn answer(mut stream: impl AsyncRead + AsyncWrite + Unpin) {
         }
     }
     let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
-    let body = if request.contains("cookie: seen=1") { "hello again" } else { "hello" };
+    // "/page" is a web page that tells the window showing it what it sees.
+    let (kind, body) = if request.starts_with("get /page") {
+        ("text/html; charset=utf-8", "<!doctype html><title>device b</title><script>top.postMessage({ type: 'device-b-page', cookie: document.cookie, host: location.host }, '*')</script>hello")
+    } else if request.contains("cookie: seen=1") {
+        ("text/plain", "hello again")
+    } else {
+        ("text/plain", "hello")
+    };
     let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nSet-Cookie: seen=1; Path=/\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nSet-Cookie: seen=1; Path=/\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = stream.write_all(response.as_bytes()).await;
     let _ = stream.shutdown().await;
+}
+
+/// A web page on port 80 and an echoing WebSocket on port 8080.
+async fn plain_servers(device: &Engine) -> Result<Servers, Error> {
+    let mut servers = Servers(Vec::new());
+    servers.run(device.listen(80).await?, |stream| answer(stream.compat()));
+    servers.run(device.listen(8080).await?, |stream| async move {
+        let Ok(mut socket) = tokio_tungstenite::accept_async(stream.compat()).await else { return };
+        while let Some(Ok(message)) = socket.next().await {
+            if (message.is_text() || message.is_binary()) && socket.send(message).await.is_err() {
+                return;
+            }
+        }
+    });
+    Ok(servers)
+}
+
+/// A client whose whole network is the second device, for trying the calls
+/// pages make.
+pub async fn paired_client(relay: &str) -> Result<crate::tab::Client, Error> {
+    let Pair { a, b, address_b } = pair(relay).await?;
+    let servers = plain_servers(&b).await?;
+    let mut netmap = crate::netmap::Netmap::default();
+    netmap.alias(NAME, address_b);
+    let net = Rc::new(crate::tab::Net { netmap: std::cell::RefCell::new(netmap), engine: a });
+    Ok(crate::tab::Client::outside_a_tailnet(net, Box::new((b, servers))))
 }
 
 /// What the page layer does, between the two devices: an HTTP request, the
@@ -180,8 +213,7 @@ pub async fn site(relay: &str) -> Result<(), Error> {
     let mut roots = RootCertStore::empty();
     roots.add(certificate).map_err(|e| Error::Network(e.to_string()))?;
 
-    let mut servers = Servers(Vec::new());
-    servers.run(b.listen(80).await?, |stream| answer(stream.compat()));
+    let mut servers = plain_servers(&b).await?;
     servers.run(b.listen(443).await?, move |stream| {
         let acceptor = acceptor.clone();
         async move {
@@ -190,16 +222,8 @@ pub async fn site(relay: &str) -> Result<(), Error> {
             }
         }
     });
-    servers.run(b.listen(8080).await?, |stream| async move {
-        let Ok(mut socket) = tokio_tungstenite::accept_async(stream.compat()).await else { return };
-        while let Some(Ok(message)) = socket.next().await {
-            if (message.is_text() || message.is_binary()) && socket.send(message).await.is_err() {
-                return;
-            }
-        }
-    });
 
-    let site = Site::new(Direct { engine: a, address: address_b }, tls::config_trusting(roots));
+    let site = Site::new(Direct { engine: Rc::new(a), address: address_b }, tls::config_trusting(roots));
     let get = |address: String| Request {
         method: "GET".to_owned(),
         url: Url::parse(&address).expect("a fixed address"),

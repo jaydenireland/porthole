@@ -76,6 +76,12 @@ pub(crate) struct Inner {
     pub(crate) site: Site<Tunnel>,
     /// The relay region other devices reach us on, once chosen.
     home_relay: std::cell::Cell<Option<u32>>,
+    /// Callers of `ready()` waiting for the home relay.
+    ready_waiters: RefCell<Vec<futures_channel::oneshot::Sender<()>>>,
+    /// Whatever a check needs kept alive for as long as the client is.
+    #[cfg(feature = "diagnostics")]
+    #[allow(dead_code, reason = "held only so it is dropped with the client")]
+    keep: RefCell<Option<Box<dyn std::any::Any>>>,
 }
 
 impl Inner {
@@ -119,6 +125,9 @@ impl Inner {
         connection.set_home_relay(&self.config, &self.keys, region).await?;
         self.home_relay.set(Some(region));
         tracing::info!(region, "home relay set");
+        for waiter in self.ready_waiters.borrow_mut().drain(..) {
+            let _ = waiter.send(());
+        }
         Ok(())
     }
 
@@ -181,6 +190,9 @@ impl Client {
                 sign_in: RefCell::new(None),
                 signed_in: std::cell::Cell::new(false),
                 home_relay: std::cell::Cell::new(None),
+                ready_waiters: RefCell::default(),
+                #[cfg(feature = "diagnostics")]
+                keep: RefCell::default(),
             }),
         })
     }
@@ -207,15 +219,20 @@ impl Client {
                 *inner.sign_in.borrow_mut() = Some(url);
                 Ok(Some(address))
             }
+            // Nowhere to send the user; `waitForSignIn` waits for the admin.
+            Registration::NeedsApproval => Ok(Some(String::new())),
         }
     }
 
     /// Resolves once the user has finished signing in at the address from
-    /// [`Client::sign_in_address`].
+    /// [`Client::sign_in_address`]. If the tailnet makes an admin approve new
+    /// devices, `on_approval_needed` is called once and this keeps waiting
+    /// until that has happened.
     #[wasm_bindgen(js_name = waitForSignIn)]
-    pub async fn wait_for_sign_in(&self) -> Result<(), Error> {
+    pub async fn wait_for_sign_in(&self, on_approval_needed: Option<js_sys::Function>) -> Result<(), Error> {
         let inner = self.inner.clone();
         let connection = inner.connection().await?;
+        let mut told = false;
         loop {
             let waiting_on = inner.sign_in.borrow().clone();
             match connection.register(&inner.config, &inner.keys, waiting_on).await? {
@@ -225,8 +242,47 @@ impl Client {
                     return Ok(());
                 }
                 Registration::NeedsSignIn(url) => *inner.sign_in.borrow_mut() = Some(url),
+                Registration::NeedsApproval => {
+                    inner.sign_in.borrow_mut().take();
+                    if !told {
+                        told = true;
+                        if let Some(callback) = &on_approval_needed {
+                            let _ = callback.call0(&JsValue::NULL);
+                        }
+                    }
+                    gloo_timers::future::sleep(std::time::Duration::from_secs(3)).await;
+                }
             }
         }
+    }
+
+    /// Resolves once other devices can answer this one: a home relay has
+    /// been chosen and the control server told. Requests made earlier work,
+    /// but their first answers may be lost and retried. Call after
+    /// [`Client::watch`].
+    pub async fn ready(&self) {
+        loop {
+            // 0 marks a choice in progress.
+            if self.inner.home_relay.get().is_some_and(|region| region != 0) {
+                return;
+            }
+            let (waiter, chosen) = futures_channel::oneshot::channel();
+            self.inner.ready_waiters.borrow_mut().push(waiter);
+            if chosen.await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Sign this device out of the tailnet. Its keys stop working, so the
+    /// saved state should be discarded.
+    #[wasm_bindgen(js_name = signOut)]
+    pub async fn sign_out(&self) -> Result<(), Error> {
+        let inner = self.inner.clone();
+        let connection = inner.connection().await?;
+        connection.sign_out(&inner.config, &inner.keys).await?;
+        inner.signed_in.set(false);
+        Ok(())
     }
 
     /// Start following the tailnet. `on_devices` is called with the device
@@ -320,6 +376,45 @@ impl Client {
         let got = stream.recv(&mut answer).await.map_err(|e| Error::Network(e.to_string()))?;
         Ok(String::from_utf8_lossy(&answer[..got]).into_owned())
     }
+}
+
+#[cfg(feature = "diagnostics")]
+impl Client {
+    /// A client that is in no tailnet: it reaches whatever `net` was set up
+    /// to reach, and holds on to `keep`.
+    pub(crate) fn outside_a_tailnet(net: Rc<Net>, keep: Box<dyn std::any::Any>) -> Client {
+        let keys = NodeState::generate();
+        Client {
+            inner: Rc::new(Inner {
+                site: Site::new(Tunnel(net.clone()), tls::config()),
+                net,
+                config: Config {
+                    server_url: ts_control::DEFAULT_CONTROL_SERVER.clone(),
+                    hostname: None,
+                    client_name: None,
+                    tags: Vec::new(),
+                    ephemeral: true,
+                },
+                keys,
+                connection: RefCell::new(None),
+                sign_in: RefCell::new(None),
+                signed_in: std::cell::Cell::new(false),
+                home_relay: std::cell::Cell::new(None),
+                ready_waiters: RefCell::default(),
+                keep: RefCell::new(Some(keep)),
+            }),
+        }
+    }
+}
+
+/// Diagnostic: resolves to a client connected to one other throwaway device,
+/// called `device-b.test`, which serves a web page on port 80 and an echoing
+/// WebSocket on port 8080. It lets a page try `request`, `websocket` and the
+/// cookie calls with no sign-in.
+#[cfg(feature = "diagnostics")]
+#[wasm_bindgen(js_name = pairedClient)]
+pub async fn paired_client(host: String) -> Result<Client, Error> {
+    crate::selftest::paired_client(&host).await
 }
 
 /// Diagnostic: resolves if this browser can pass a packet through the relay
