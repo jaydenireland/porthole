@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rust client start test</title>
+<body style="font:14px/1.5 system-ui,sans-serif;color-scheme:light dark;padding:16px">
+<h1 style="font-size:18px">Rust client start test</h1>
+<p>Loads the Rust build of the Tailscale client in this browser, connects to the control server, and asks for a sign-in address. It does not sign in. Add <code>?report</code> to send the result to the server log.</p>
+<pre id="out">running…</pre>
+<script type="module">
+const out = { ua: navigator.userAgent, secure: window.isSecureContext };
+const t0 = performance.now();
+const ms = () => Math.round(performance.now() - t0);
+try {
+  const { default: init, Client } = await import("/client/porthole_client.js");
+  const wasm = await init();
+  out.loadedMs = ms();
+  const client = new Client("porthole-test", true);
+  const saved = JSON.parse(client.state());
+  out.stateKeys = Object.keys(saved).sort().join(",");
+  const address = await Promise.race([
+    client.signInAddress(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("timed out after 45 s")), 45000)),
+  ]);
+  out.signInAddressMs = ms();
+  out.gotSignInAddress = /^https:\/\/login\.tailscale\.com\//.test(address ?? "");
+  out.wasmMemoryMB = Math.round(wasm.memory.buffer.byteLength / 1048576 * 10) / 10;
+  out.ok = out.gotSignInAddress === true;
+} catch (e) {
+  out.ok = false;
+  out.error = String(e && e.message || e);
+}
+document.getElementById("out").textContent = JSON.stringify(out, null, 2);
+document.title = out.ok ? "CLIENT OK" : "CLIENT FAILED";
+if (new URLSearchParams(location.search).has("report")) fetch("/test/report?" + new URLSearchParams({ suite: "client-rs", ...out }));
+</script>
+</body>

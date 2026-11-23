@@ -1,0 +1,62 @@
+[package]
+name = "porthole-client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+description = "Porthole's Tailscale client for browser tabs, built on tailscale-rs."
+license = "BSD-3-Clause"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tokio = { version = "1", default-features = false, features = ["io-util"] }
+
+# Everything else is for the browser build.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Tailscale's own Rust crates (github.com/tailscale/tailscale-rs), from the
+# pinned and patched checkout that build.sh prepares. See tailscale-rs.patch.
+ts_capabilityversion = { path = "../tailscale-rs-src/crates/capabilities/ts_capabilityversion" }
+ts_control = { path = "../tailscale-rs-src/crates/control_plane/ts_control" }
+ts_control_noise = { path = "../tailscale-rs-src/crates/control_plane/ts_control_noise" }
+ts_http_util = { path = "../tailscale-rs-src/crates/utils/ts_http_util" }
+ts_keys = { path = "../tailscale-rs-src/crates/utils/ts_keys", features = ["serde"] }
+
+# Browser bindings.
+console_error_panic_hook = "0.1"
+gloo-net = { version = "0.6", default-features = false, features = ["http"] }
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+ws_stream_wasm = { version = "0.7", features = ["tokio_io"] }
+
+# The libraries report what they are doing through `tracing`. With the
+# `console-log` feature those reports go to the browser console.
+tracing = { version = "0.1", default-features = false }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std"], optional = true }
+tracing-web = { version = "0.1", optional = true }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+url = "2"
+
+# Random numbers come from the browser. These lines only switch that on in
+# the versions of getrandom that the crates above pull in.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "rt"] }
+
+[features]
+default = ["console-log"]
+console-log = ["dep:tracing-subscriber", "dep:tracing-web"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"

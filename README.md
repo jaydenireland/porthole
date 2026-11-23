@@ -15,6 +15,8 @@ Porthole is an independent project and is not affiliated with Tailscale Inc.
 | `web/` | The site: landing page, the app, the service worker, tests. See `web/README.md`. |
 | `cloudflare/` | Worker, config and scripts that publish `web/` to `porthole.app`. See `cloudflare/README.md`. |
 | `tailscale-src/` | Not in the repository. `web/build.sh` fetches Tailscale's source here and applies `web/tsconnect.patch`. |
+| `client/` | Work in progress: a smaller Tailscale client in Rust, not used by the app yet. See `client/README.md`. |
+| `tailscale-rs-src/` | Not in the repository. `client/build.sh` fetches tailscale-rs here and applies `client/tailscale-rs.patch`. |
 
 ## Get it running
 
@@ -43,6 +45,8 @@ Each tailnet site is shown on its own subdomain, such as
 | Page loading, cookies, WebSockets, streaming | Open `/test/mock.html`. It uses stand-in sites and needs no tailnet. |
 | Client start | Open `/test/client.html`. It starts the client and asks Tailscale for a sign-in address, without signing in. |
 | Go code added to the client | `RUN_TESTS=1 web/build.sh` |
+| Rust client start (work in progress) | `client/build.sh`, then open `/test/client-rs.html`. |
+| Rust client code | `RUN_TESTS=1 client/build.sh` |
 
 Add `?report` to either page to have it send its result to the server log,
 which helps on a device with no way to read the screen closely.

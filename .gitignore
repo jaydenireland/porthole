@@ -5,6 +5,13 @@
 # The built Tailscale client. Run web/build.sh to produce it.
 /web/node/
 
+# The Rust client (work in progress, see client/README.md): the tailscale-rs
+# source that client/build.sh fetches and patches (our changes are kept in
+# client/tailscale-rs.patch), Cargo's build folder, and the built client.
+/tailscale-rs-src/
+/client/target/
+/web/client/
+
 # Cloudflare build output and tooling
 node_modules/
 /cloudflare/dist/

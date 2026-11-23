@@ -1,0 +1,477 @@
+diff --git a/crates/control_plane/ts_control/Cargo.toml b/crates/control_plane/ts_control/Cargo.toml
+index 73c2808..fb0b6e1 100644
+--- a/crates/control_plane/ts_control/Cargo.toml
++++ b/crates/control_plane/ts_control/Cargo.toml
+@@ -23,25 +23,31 @@ ts_keys.workspace = true
+ ts_packet.workspace = true
+ ts_packetfilter.workspace = true
+ ts_packetfilter_state.workspace = true
+-ts_tls_util.workspace = true
+ ts_derp.workspace = true
+ 
+ # Unconditionally required dependencies.
+ bytes.workspace = true
+ chrono = { workspace = true, features = ["clock", "serde"] }
+-gethostname.workspace = true
+ ipnet = { workspace = true, features = ["serde"] }
+ lazy_static.workspace = true
+ pin-project-lite.workspace = true
+ serde.workspace = true
+ serde_json.workspace = true
+ thiserror.workspace = true
+-tokio-util = { workspace = true, features = ["time"] }
++tokio-util = { workspace = true }
+ tracing.workspace = true
+ url = { workspace = true, features = ["serde", "std"] }
+ zerocopy.workspace = true
+ futures-util = { workspace = true }
+-tokio = { workspace = true }
++tokio = { version = "1", default-features = false, features = ["io-util", "macros"] }
++
++# Dialing the control server and reading the OS hostname are for native
++# targets. In a browser the embedder supplies the connection and the hostname.
++[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
++ts_tls_util.workspace = true
++gethostname.workspace = true
++tokio = { version = "1", default-features = false, features = ["net", "time", "rt"] }
++tokio-util = { workspace = true, features = ["time"] }
+ 
+ [features]
+ # Allow derp connections to be made without verifying TLS certs. Only for use in tests.
+diff --git a/crates/control_plane/ts_control/src/client/connect.rs b/crates/control_plane/ts_control/src/client/connect.rs
+index 96e9bf2..3fcb0ae 100644
+--- a/crates/control_plane/ts_control/src/client/connect.rs
++++ b/crates/control_plane/ts_control/src/client/connect.rs
+@@ -157,6 +157,7 @@ impl fmt::Display for ControlPublicKeys {
+ ///
+ /// Does not make use of use [`ControlDialer`][crate::ControlDialer] and so should not be used for
+ /// long-duration connections that may need to reconnect (e.g. listening for netmap changes).
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+ #[tracing::instrument(skip_all, fields(%control_url), err)]
+ pub async fn connect(
+     control_url: &Url,
+@@ -187,6 +188,7 @@ pub async fn connect(
+ 
+ /// Connect an HTTP/1.1 client to the control server, using TLS for https://
+ /// URLs and plain TCP for http:// URLs.
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+ async fn connect_h1(url: &Url) -> Result<ts_http_util::Http1<EmptyBody>, ConnectionError> {
+     if url.scheme() == "http" {
+         Ok(ts_http_util::http1::connect_tcp(url).await?)
+@@ -202,6 +204,7 @@ async fn connect_h1(url: &Url) -> Result<ts_http_util::Http1<EmptyBody>, Connect
+ /// and validates the server's certificate. This is a critical, load-bearing requirement for
+ /// security: if the control server key is MITMed, it's game over. `insecure-keyfetch` is provided
+ /// ONLY for integration testing, where it's not practical to issue valid certs.
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+ #[tracing::instrument(skip_all, fields(%control_url), ret, err, level = "trace")]
+ pub async fn fetch_control_key(control_url: &Url) -> Result<MachinePublicKey, ConnectionError> {
+     let mut key_url = control_url.join("/key")?;
+diff --git a/crates/control_plane/ts_control/src/client/mod.rs b/crates/control_plane/ts_control/src/client/mod.rs
+index ca1d5e9..8ec55fd 100644
+--- a/crates/control_plane/ts_control/src/client/mod.rs
++++ b/crates/control_plane/ts_control/src/client/mod.rs
+@@ -12,9 +12,9 @@ mod ping;
+ mod prefixed_reader;
+ mod register;
+ 
+-pub use connect::{
+-    CONTROL_PROTOCOL_VERSION, connect, fetch_control_key, read_challenge_packet, upgrade_ts2021,
+-};
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
++pub use connect::{connect, fetch_control_key};
++pub use connect::{CONTROL_PROTOCOL_VERSION, read_challenge_packet, upgrade_ts2021};
+ pub use map_stream::{FilterUpdate, PeerUpdate, StateUpdate, map_stream, send_map_request};
+ pub use ping::handle_ping;
+ pub use register::{RegistrationError, register};
+diff --git a/crates/control_plane/ts_control/src/config.rs b/crates/control_plane/ts_control/src/config.rs
+index b70c98f..cafafee 100644
+--- a/crates/control_plane/ts_control/src/config.rs
++++ b/crates/control_plane/ts_control/src/config.rs
+@@ -60,7 +60,11 @@ impl Default for Config {
+     fn default() -> Self {
+         Self {
+             server_url: DEFAULT_CONTROL_SERVER.clone(),
++            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+             hostname: gethostname::gethostname().into_string().ok(),
++            // A browser has no hostname to read; the embedder sets one.
++            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
++            hostname: None,
+             client_name: None,
+             tags: Default::default(),
+             ephemeral: false,
+diff --git a/crates/control_plane/ts_control/src/lib.rs b/crates/control_plane/ts_control/src/lib.rs
+index cd4f5e6..64c92e8 100644
+--- a/crates/control_plane/ts_control/src/lib.rs
++++ b/crates/control_plane/ts_control/src/lib.rs
+@@ -13,6 +13,7 @@ pub const PKG_VERSION: &str = if let Some(version) = option_env!("CARGO_PKG_VERS
+ 
+ pub mod client;
+ mod config;
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+ mod control_dialer;
+ mod derp;
+ mod dial_plan;
+@@ -21,9 +22,12 @@ mod node;
+ 
+ use std::fmt;
+ 
+-pub use client::{FilterUpdate, PeerUpdate, RegistrationError, StateUpdate, connect, register};
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
++pub use client::connect;
++pub use client::{FilterUpdate, PeerUpdate, RegistrationError, StateUpdate, register};
+ #[doc(inline)]
+ pub use config::{Config, DEFAULT_CONTROL_SERVER};
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+ pub use control_dialer::{ControlDialer, TcpDialer, complete_connection};
+ pub use derp::{Map as DerpMap, Region as DerpRegion, convert_derp_map};
+ pub use dial_plan::{DialCandidate, DialMode, DialPlan};
+diff --git a/crates/control_plane/ts_control_noise/Cargo.toml b/crates/control_plane/ts_control_noise/Cargo.toml
+index c2515ec..3c90bda 100644
+--- a/crates/control_plane/ts_control_noise/Cargo.toml
++++ b/crates/control_plane/ts_control_noise/Cargo.toml
+@@ -25,12 +25,13 @@ futures-util = { workspace = true, features = ["sink"] }
+ pin-project-lite.workspace = true
+ static_assertions.workspace = true
+ thiserror.workspace = true
+-tokio = { workspace = true, features = ["io-util"] }
++tokio = { version = "1", default-features = false, features = ["io-util"] }
+ tokio-util = { workspace = true, features = ["codec"] }
+ tracing.workspace = true
+ zerocopy.workspace = true
+ 
+ [dev-dependencies]
++tokio = { workspace = true }
+ rand.workspace = true
+ proptest.workspace = true
+ 
+diff --git a/crates/net/underlay/ts_derp/Cargo.toml b/crates/net/underlay/ts_derp/Cargo.toml
+index af3ca41..912bdf6 100644
+--- a/crates/net/underlay/ts_derp/Cargo.toml
++++ b/crates/net/underlay/ts_derp/Cargo.toml
+@@ -15,7 +15,6 @@ rust-version.workspace = true
+ ts_http_util.workspace = true
+ ts_keys.workspace = true
+ ts_packet.workspace = true
+-ts_tls_util.workspace = true
+ ts_transport.workspace = true
+ ts_util = { workspace = true, features = ["alloc"] }
+ 
+@@ -27,13 +26,19 @@ hex.workspace = true
+ serde.workspace = true
+ serde_json.workspace = true
+ thiserror.workspace = true
+-tokio.workspace = true
++tokio = { version = "1", default-features = false, features = ["io-util", "macros"] }
+ tokio-util.workspace = true
+ tracing.workspace = true
+ url.workspace = true
+ yoke = { workspace = true, features = ["alloc", "derive"] }
+ zerocopy.workspace = true
+ 
++# Dialing a relay over TCP and TLS is for native targets. In a browser the
++# embedder supplies the connection.
++[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
++ts_tls_util.workspace = true
++tokio = { version = "1", default-features = false, features = ["net", "time", "rt"] }
++
+ [dev-dependencies]
+ reqwest.workspace = true
+ tokio = { workspace = true, features = ["full"] }
+diff --git a/crates/net/underlay/ts_derp/src/client.rs b/crates/net/underlay/ts_derp/src/client.rs
+index 726ddb6..8609967 100644
+--- a/crates/net/underlay/ts_derp/src/client.rs
++++ b/crates/net/underlay/ts_derp/src/client.rs
+@@ -30,6 +30,7 @@ pub struct Client<Io> {
+ }
+ 
+ /// Establish and upgrade a http connection to the derp region.
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+ #[tracing::instrument(skip_all, err)]
+ pub async fn connect<'c>(
+     region: impl IntoIterator<Item = &'c ServerConnInfo>,
+@@ -210,6 +211,7 @@ where
+ 
+ impl Client<DefaultIo> {
+     /// Connect to and handshake with the derp server with the given URL over HTTP.
++    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+     pub async fn connect<'c>(
+         region: impl IntoIterator<Item = &'c ServerConnInfo>,
+         node_keypair: &NodeKeyPair,
+diff --git a/crates/net/underlay/ts_derp/src/lib.rs b/crates/net/underlay/ts_derp/src/lib.rs
+index 968dedf..170fe10 100644
+--- a/crates/net/underlay/ts_derp/src/lib.rs
++++ b/crates/net/underlay/ts_derp/src/lib.rs
+@@ -9,6 +9,7 @@ use core::{
+ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+ 
+ mod client;
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+ pub mod dial;
+ mod error;
+ pub mod frame;
+diff --git a/crates/utils/ts_http_util/Cargo.toml b/crates/utils/ts_http_util/Cargo.toml
+index 6f24436..4e3039a 100644
+--- a/crates/utils/ts_http_util/Cargo.toml
++++ b/crates/utils/ts_http_util/Cargo.toml
+@@ -11,24 +11,32 @@ license.workspace = true
+ rust-version.workspace = true
+ 
+ [dependencies]
+-# Our crates.
+-ts_tls_util.workspace = true
+-
+ # Unconditionally required dependencies.
+ bytes.workspace = true
+-futures.workspace = true
++futures = { workspace = true, features = ["alloc"] }
+ http.workspace = true
+ httparse.workspace = true
+ http-body-util.workspace = true
+ hyper = { workspace = true, features = ["http1", "client"] }
+ hyper-util = { workspace = true, features = ["tokio"] }
+ thiserror.workspace = true
+-tokio = { workspace = true, features = ["net", "io-util"] }
++tokio = { version = "1", default-features = false, features = ["io-util", "sync"] }
+ tokio-util = { workspace = true, features = ["io"] }
+ tracing.workspace = true
+ url.workspace = true
+ 
++# Dialing TCP and TLS, and tokio's own task runtime, are for native targets.
++# In a browser the embedder supplies the connection and tasks run on the
++# page's event loop.
++[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
++ts_tls_util.workspace = true
++tokio = { version = "1", default-features = false, features = ["net", "rt"] }
++
++[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
++wasm-bindgen-futures = "0.4"
++
+ [dev-dependencies]
++tokio = { workspace = true }
+ tracing-test = { workspace = true, features = ["no-env-filter"] }
+ ts_test_util.workspace = true
+ 
+diff --git a/crates/utils/ts_http_util/src/http1.rs b/crates/utils/ts_http_util/src/http1.rs
+index de44cb1..3029d0a 100644
+--- a/crates/utils/ts_http_util/src/http1.rs
++++ b/crates/utils/ts_http_util/src/http1.rs
+@@ -17,10 +17,9 @@ use hyper_util::rt::tokio::WithHyperIo;
+ use tokio::{
+     io::{AsyncRead, AsyncWrite},
+     sync::Mutex,
+-    task::JoinSet,
+ };
+ 
+-use crate::{Client, Error};
++use crate::{Client, Error, rt};
+ 
+ /// "Chunked" value of the [`Transfer-Encoding HTTP header`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Transfer-Encoding).
+ const ENCODING_CHUNKED: HeaderValue = HeaderValue::from_static("chunked");
+@@ -45,7 +44,7 @@ impl<B> Debug for Http1<B> {
+ 
+ struct Inner<B> {
+     client: Mutex<SendRequest<B>>,
+-    _runner: JoinSet<()>,
++    _runner: rt::Task,
+ }
+ 
+ impl<B> Client<B> for Http1<B>
+@@ -83,9 +82,7 @@ where
+         })
+         .map_err(Error::from)?;
+ 
+-    let mut joinset = JoinSet::new();
+-
+-    joinset.spawn(async move {
++    let joinset = rt::Task::spawn(async move {
+         if let Err(e) = conn.with_upgrades().await {
+             tracing::error!(?e, "error in http/1.1 connection; closing connection");
+         }
+@@ -100,6 +97,7 @@ where
+ }
+ 
+ /// Establish an HTTP/1.1 connection to the server at the given `url` over plaintext TCP.
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+ pub async fn connect_tcp<B>(url: &url::Url) -> Result<Http1<B>, Error>
+ where
+     B: Body + Send + 'static,
+@@ -111,6 +109,7 @@ where
+ }
+ 
+ /// Establish an HTTP/1.1 connection to the server at the given `url` over encrypted TLS.
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+ pub async fn connect_tls<B>(url: &url::Url) -> Result<Http1<B>, Error>
+ where
+     B: Body + Send + 'static,
+diff --git a/crates/utils/ts_http_util/src/http2.rs b/crates/utils/ts_http_util/src/http2.rs
+index d2642b6..5213b44 100644
+--- a/crates/utils/ts_http_util/src/http2.rs
++++ b/crates/utils/ts_http_util/src/http2.rs
+@@ -10,14 +10,13 @@ use hyper::{
+     body::{Body, Incoming},
+     client::conn::http2::SendRequest,
+ };
+-use hyper_util::rt::{TokioExecutor, tokio::WithHyperIo};
++use hyper_util::rt::tokio::WithHyperIo;
+ use tokio::{
+     io::{AsyncRead, AsyncWrite},
+     sync::Mutex,
+-    task::JoinSet,
+ };
+ 
+-use crate::{Client, Error};
++use crate::{Client, Error, rt};
+ 
+ /// An HTTP/2 client that can connect to a server and send HTTP requests/receive HTTP responses.
+ #[derive(Clone)]
+@@ -33,7 +32,7 @@ impl<B> Debug for Http2<B> {
+ 
+ struct Inner<B> {
+     client: Mutex<SendRequest<B>>,
+-    _runner: JoinSet<()>,
++    _runner: rt::Task,
+ }
+ 
+ impl<B> Client<B> for Http2<B>
+@@ -65,16 +64,14 @@ where
+     B::Error: core::error::Error + Send + Sync + 'static,
+ {
+     let (client, conn) =
+-        hyper::client::conn::http2::handshake(TokioExecutor::new(), WithHyperIo::new(io))
++        hyper::client::conn::http2::handshake(rt::executor(), WithHyperIo::new(io))
+             .await
+             .inspect_err(|e| {
+                 tracing::error!(error = %e, "http2 handshake");
+             })
+             .map_err(Error::from)?;
+ 
+-    let mut tasks = JoinSet::new();
+-
+-    tasks.spawn(async move {
++    let tasks = rt::Task::spawn(async move {
+         if let Err(e) = conn.await {
+             tracing::error!(?e, "error in http/2 connection; closing connection");
+         }
+@@ -89,6 +86,7 @@ where
+ }
+ 
+ /// Establish an HTTP/2 connection to the server at the given `url` over plaintext TCP.
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+ pub async fn connect_tcp<B>(url: &url::Url) -> Result<Http2<B>, Error>
+ where
+     B: Body + Send + Unpin + 'static,
+@@ -100,6 +98,7 @@ where
+ }
+ 
+ /// Establish an HTTP/2 connection to the server at the given `url` over encrypted TLS.
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+ pub async fn connect_tls<B>(url: &url::Url) -> Result<Http2<B>, Error>
+ where
+     B: Body + Send + Unpin + 'static,
+diff --git a/crates/utils/ts_http_util/src/lib.rs b/crates/utils/ts_http_util/src/lib.rs
+index 7945f12..701b2dd 100644
+--- a/crates/utils/ts_http_util/src/lib.rs
++++ b/crates/utils/ts_http_util/src/lib.rs
+@@ -7,12 +7,14 @@ pub use http::{
+ };
+ use http_body_util::{Empty, Full};
+ use hyper::body::Incoming;
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+ use tokio::net::TcpStream;
+ 
+ mod client;
+ mod error;
+ pub mod http1;
+ pub mod http2;
++mod rt;
+ 
+ pub use client::{Client, ClientExt};
+ pub use error::Error;
+@@ -122,6 +124,7 @@ pub fn host_header(u: &url::Url) -> Option<(HeaderName, HeaderValue)> {
+     Some((HOST, HeaderValue::from_str(u.host_str()?).ok()?))
+ }
+ 
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+ async fn dial_tcp(url: &url::Url) -> Result<TcpStream, Error> {
+     let conn = TcpStream::connect((
+         url.host_str().ok_or(Error::InvalidInput)?,
+@@ -138,6 +141,7 @@ async fn dial_tcp(url: &url::Url) -> Result<TcpStream, Error> {
+     Ok(conn)
+ }
+ 
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+ async fn dial_tls(
+     url: &url::Url,
+     alpn: impl IntoIterator<Item = Vec<u8>>,
+diff --git a/crates/utils/ts_http_util/src/rt.rs b/crates/utils/ts_http_util/src/rt.rs
+new file mode 100644
+index 0000000..070d017
+--- /dev/null
++++ b/crates/utils/ts_http_util/src/rt.rs
+@@ -0,0 +1,66 @@
++//! Where connection tasks run: tokio natively, the page's event loop in a browser.
++
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
++mod imp {
++    /// A background task that is cancelled when this is dropped.
++    pub(crate) struct Task(#[allow(dead_code)] tokio::task::JoinSet<()>);
++
++    impl Task {
++        pub(crate) fn spawn(fut: impl Future<Output = ()> + Send + 'static) -> Self {
++            let mut set = tokio::task::JoinSet::new();
++            set.spawn(fut);
++            Self(set)
++        }
++    }
++
++    pub(crate) type Executor = hyper_util::rt::TokioExecutor;
++
++    pub(crate) fn executor() -> Executor {
++        hyper_util::rt::TokioExecutor::new()
++    }
++}
++
++#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
++mod imp {
++    use futures::future::{AbortHandle, abortable};
++
++    /// A background task that is cancelled when this is dropped.
++    pub(crate) struct Task(AbortHandle);
++
++    impl Task {
++        pub(crate) fn spawn(fut: impl Future<Output = ()> + 'static) -> Self {
++            let (fut, handle) = abortable(fut);
++            wasm_bindgen_futures::spawn_local(async move {
++                let _ = fut.await;
++            });
++            Self(handle)
++        }
++    }
++
++    impl Drop for Task {
++        fn drop(&mut self) {
++            self.0.abort();
++        }
++    }
++
++    /// Runs hyper's internal tasks on the page's event loop.
++    #[derive(Clone, Copy, Debug, Default)]
++    pub(crate) struct Executor;
++
++    impl<F> hyper::rt::Executor<F> for Executor
++    where
++        F: Future + 'static,
++    {
++        fn execute(&self, fut: F) {
++            wasm_bindgen_futures::spawn_local(async move {
++                drop(fut.await);
++            });
++        }
++    }
++
++    pub(crate) fn executor() -> Executor {
++        Executor
++    }
++}
++
++pub(crate) use imp::{Task, executor};
