@@ -1,0 +1,81 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Socket test</title>
+<body style="font:14px/1.5 system-ui,sans-serif;color-scheme:light dark;padding:16px">
+<h1 style="font-size:18px">Socket test</h1>
+<p>Tries the kinds of connection the Tailscale client makes from this browser, one at a time, and shows which ones open. It does not sign in and sends nothing about you.</p>
+<p><button id="copy" hidden style="font:inherit;padding:8px 14px">Copy result</button></p>
+<pre id="out" style="white-space:pre-wrap;word-break:break-all">running…</pre>
+<script type="module">
+const out = { ua: navigator.userAgent, online: navigator.onLine, connection: navigator.connection?.effectiveType };
+const show = () => { document.getElementById("out").textContent = JSON.stringify(out, null, 2); };
+
+// Open a WebSocket and say how far it got. `opened` false with code 1006
+// means the browser never got an upgrade from the server.
+function socket(url, protocols) {
+  return new Promise((resolve) => {
+    const t0 = performance.now();
+    const ms = () => Math.round(performance.now() - t0);
+    let opened = false, ws;
+    try { ws = protocols ? new WebSocket(url, protocols) : new WebSocket(url); }
+    catch (e) { resolve({ threw: String(e.message || e) }); return; }
+    const timer = setTimeout(() => { resolve({ opened, timedOut: true, ms: ms() }); try { ws.close(); } catch {} }, 8000);
+    ws.onopen = () => { opened = true; if (!url.includes("X-Tailscale-Handshake")) { clearTimeout(timer); resolve({ opened, ms: ms(), protocol: ws.protocol }); ws.close(); } };
+    ws.onclose = (e) => { clearTimeout(timer); resolve({ opened, code: e.code, clean: e.wasClean, ms: ms() }); };
+  });
+}
+
+const CONTROL = "controlplane.tailscale.com";
+// Not a real handshake: the server accepts the socket, then closes it.
+const filler = btoa(String.fromCharCode(...new Uint8Array(101).fill(7)));
+const control = (query) => `wss://${CONTROL}/ts2021${query}`;
+
+try {
+  out.controlSocket = await socket(control("?X-Tailscale-Handshake=" + encodeURIComponent(filler)), ["tailscale-control-protocol"]);
+  show();
+  out.controlSocketNoProtocol = await socket(control("?X-Tailscale-Handshake=" + encodeURIComponent(filler)));
+  show();
+  out.controlSocketShortAddress = await socket(control("?X-Tailscale-Handshake=AAAA"), ["tailscale-control-protocol"]);
+  show();
+  const t0 = performance.now();
+  out.controlKeyFetch = await fetch(`https://${CONTROL}/key?v=130`).then(
+    async (r) => ({ status: r.status, bytes: (await r.text()).length, ms: Math.round(performance.now() - t0) }),
+    (e) => ({ failed: String(e.message || e) }));
+  show();
+  out.controlSocketAfterFetch = await socket(control("?X-Tailscale-Handshake=" + encodeURIComponent(filler)), ["tailscale-control-protocol"]);
+  show();
+  out.controlSocketAgain = await socket(control("?X-Tailscale-Handshake=" + encodeURIComponent(filler)), ["tailscale-control-protocol"]);
+  show();
+  out.relaySocket = await socket("wss://derp1.tailscale.com/derp", ["derp"]);
+  show();
+  out.otherSocket = await socket("wss://ws.postman-echo.com/raw");
+  show();
+
+  // The two clients themselves, as far as a sign-in address.
+  const withTimeout = (promise, seconds) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out after ${seconds} s`)), seconds * 1000))]);
+  try {
+    const { default: init, Client } = await import("/client/porthole_client.js");
+    await init();
+    const attempts = [];
+    for (let i = 0; i < 3; i++) {
+      const t = performance.now();
+      attempts.push(await withTimeout(new Client("porthole-test", true).signInAddress(), 20).then(
+        (address) => ({ ok: /^https:\/\/login\.tailscale\.com\//.test(address ?? ""), ms: Math.round(performance.now() - t) }),
+        (e) => ({ error: String(e.message || e).slice(0, 200), ms: Math.round(performance.now() - t) })));
+      out.rustClient = attempts;
+      show();
+    }
+  } catch (e) { out.rustClient = { loadFailed: String(e.message || e) }; }
+  show();
+} catch (e) {
+  out.failed = String(e && e.message || e);
+}
+out.done = true;
+show();
+const copy = document.getElementById("copy");
+copy.hidden = false;
+copy.onclick = () => navigator.clipboard.writeText(document.getElementById("out").textContent).then(() => { copy.textContent = "Copied"; });
+if (new URLSearchParams(location.search).has("report")) fetch("/test/report?" + new URLSearchParams({ suite: "sockets", result: JSON.stringify(out) }));
+</script>
+</body>
