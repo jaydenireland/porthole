@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#131b27" media="(prefers-color-scheme: dark)">
 <title>Porthole</title>
 <meta name="description" content="Browse your Tailscale network from this browser tab.">
 <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
@@ -10,6 +12,7 @@
 <style>
   html, body { height: 100%; }
   body { display: flex; flex-direction: column; font-size: 15px; }
+  @supports (height: 100dvh) { body { height: 100dvh; } }
 
   .bar {
     display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px;
@@ -84,7 +87,57 @@
   #peers .offline { opacity: .6; }
   #peers .offline .addr::before { content: "offline · "; font-family: var(--sans); }
   .empty { color: var(--muted); padding: 18px 2px; }
-  @media (max-width: 520px) { #peers .addr { display: none; } .status span:last-child { display: none; } }
+  @media (max-width: 520px) { #peers .addr { display: none; } }
+
+  #loading { position: absolute; top: 0; left: 0; right: 0; z-index: 1; height: 3px; margin: 0; border-radius: 0; background: none; }
+
+  /* The menu holds what does not fit in the bar on a phone. */
+  .more { display: none; position: relative; }
+  #menuBtn .dot { position: absolute; top: 7px; right: 6px; width: 8px; height: 8px; box-shadow: 0 0 0 2px var(--surface); }
+  #menuShade { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 9; }
+  #menu {
+    position: absolute; top: calc(100% + 6px); right: 0; z-index: 10; min-width: 230px; padding: 6px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow);
+  }
+  #menu .menu-status {
+    display: flex; align-items: center; gap: 9px; padding: 9px 12px 11px; margin-bottom: 6px;
+    color: var(--muted); font-size: 14px; border-bottom: 1px solid var(--border);
+  }
+  #menu button, #menu a {
+    display: flex; align-items: center; gap: 12px; width: 100%; min-height: 46px; padding: 0 12px;
+    font: 16px/1.2 var(--sans); color: var(--text); text-align: left; text-decoration: none;
+    background: none; border: 0; border-radius: 9px; cursor: pointer;
+  }
+  #menu button:disabled { opacity: .35; cursor: default; }
+  #menu button:active:not(:disabled), #menu a:active { background: var(--surface-2); }
+  #menu svg { width: 20px; height: 20px; flex: none; }
+
+  @media (max-width: 640px) {
+    .bar {
+      flex-wrap: nowrap; gap: 4px;
+      padding: 6px max(6px, env(safe-area-inset-right)) 6px max(6px, env(safe-area-inset-left));
+    }
+    .bar .brand, #homeBtn, #forward, #go, .bar .status, #logout { display: none; }
+    .tools { display: contents; }
+    .tool { width: 42px; height: 42px; flex: none; border-radius: 10px; }
+    .tool svg { width: 21px; height: 21px; }
+    .tool:active:not(:disabled) { background: var(--surface-2); }
+    #addressForm { order: 1; min-width: 0; }
+    /* 16px keeps iOS from zooming the page when the field is focused. */
+    #address { font: 16px/1.25 var(--sans); padding: 9px 14px; border-radius: 21px; text-overflow: ellipsis; }
+    #reload { order: 2; }
+    .more { display: block; order: 3; flex: none; }
+
+    #home { padding: 18px 14px calc(32px + env(safe-area-inset-bottom)); }
+    .card { padding: 24px 18px; }
+    .card.center { margin-top: 2vh; }
+    .card.center .btn { display: flex; width: 100%; }
+    h1 { font-size: 22px; }
+    #filter { font-size: 16px; }
+    #peers button { min-height: 58px; }
+    #notice { padding: 10px 12px; }
+    #notice button { font-size: 24px; padding: 4px 8px; }
+  }
 </style>
 </head>
 <body>
@@ -108,16 +161,43 @@
     </button>
   </div>
   <form id="addressForm">
-    <input id="address" type="text" inputmode="url" placeholder="Device name or address, for example nas:8080" aria-label="Address" autocomplete="off" autocapitalize="off" spellcheck="false" disabled>
+    <input id="address" type="text" inputmode="url" enterkeyhint="go" placeholder="Device name or address, for example nas:8080" aria-label="Address" autocomplete="off" autocapitalize="off" spellcheck="false" disabled>
     <button class="btn primary" id="go" disabled>Go</button>
   </form>
-  <div class="status" role="status"><span id="dot" class="dot"></span><span id="state">Starting</span></div>
+  <div class="status" role="status"><span class="dot status-dot"></span><span class="status-text">Starting</span></div>
   <button class="btn" id="logout" hidden>Disconnect</button>
+  <div class="more">
+    <button class="tool" id="menuBtn" type="button" aria-label="Menu" aria-haspopup="true" aria-expanded="false" aria-controls="menu">
+      <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><circle cx="10" cy="4.500" r="1.500"/><circle cx="10" cy="10" r="1.500"/><circle cx="10" cy="15.500" r="1.500"/></svg>
+      <span class="dot status-dot"></span>
+    </button>
+    <div id="menuShade" hidden></div>
+    <div id="menu" hidden>
+      <div class="menu-status"><span class="dot status-dot"></span><span class="status-text">Starting</span></div>
+      <button type="button" data-for="homeBtn">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.700" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="5.500" height="5.500" rx="1.200"/><rect x="11.500" y="3" width="5.500" height="5.500" rx="1.200"/><rect x="3" y="11.500" width="5.500" height="5.500" rx="1.200"/><rect x="11.500" y="11.500" width="5.500" height="5.500" rx="1.200"/></svg>
+        Your devices
+      </button>
+      <button type="button" data-for="forward">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.800" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.500 4.500 13 10l-5.500 5.500"/></svg>
+        Forward
+      </button>
+      <button type="button" data-for="logout">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.700" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3.500H5a1.500 1.500 0 0 0-1.500 1.500v10A1.500 1.500 0 0 0 5 16.500h3"/><path d="M13 6.500 16.500 10 13 13.500"/><path d="M16.500 10H8"/></svg>
+        Disconnect
+      </button>
+      <a href="/" target="_blank" rel="noopener">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.700" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M10 9.500v4"/><path d="M10 6.500v.01"/></svg>
+        About Porthole
+      </a>
+    </div>
+  </div>
 </header>
 
 <div id="notice" role="alert" hidden><span id="noticeText"></span><button id="noticeClose" aria-label="Dismiss">×</button></div>
 
 <main id="viewport">
+  <div class="progress busy" id="loading" hidden><i></i></div>
   <iframe id="frame" title="Page from your tailnet" hidden></iframe>
   <div id="home">
 
@@ -180,8 +260,8 @@ function show(view) {
 }
 
 function setStatus(label, kind) {
-  $("state").textContent = label;
-  $("dot").className = "dot " + kind;
+  for (const el of document.querySelectorAll(".status-text")) el.textContent = label;
+  for (const el of document.querySelectorAll(".status-dot")) el.className = "dot status-dot " + kind;
 }
 
 let noticeTimer;
@@ -375,6 +455,55 @@ function refreshControls() {
   $("reload").disabled = !showing || index < 0;
   $("back").disabled = !showing || index <= 0;
   $("forward").disabled = !showing || index >= visited.length - 1;
+  for (const item of $("menu").querySelectorAll("[data-for]")) {
+    const target = $(item.dataset.for);
+    item.disabled = target.disabled || target.hidden;
+  }
+}
+
+// --- Phone layout -----------------------------------------------------------
+
+// On a narrow screen the bar is one row: back, address, reload, menu. The
+// menu's buttons stand in for the ones that are hidden there.
+const compact = matchMedia("(max-width: 640px)");
+
+function setMenu(open) {
+  $("menu").hidden = !open;
+  $("menuShade").hidden = !open;
+  $("menuBtn").setAttribute("aria-expanded", String(open));
+}
+$("menuBtn").addEventListener("click", () => setMenu($("menu").hidden));
+$("menuShade").addEventListener("click", () => setMenu(false));
+addEventListener("keydown", (ev) => { if (ev.key === "Escape") setMenu(false); });
+$("menu").addEventListener("click", (ev) => {
+  const item = ev.target.closest("button, a");
+  if (!item) return;
+  setMenu(false);
+  if (item.dataset.for) $(item.dataset.for).click();
+});
+
+// The address field is short on a phone, so it shows the address without
+// "http://" until it is focused.
+let shownURL = "";
+const short = (url) => (compact.matches ? url.replace(/^https?:\/\//, "").replace(/^([^/]+)\/$/, "$1") : url);
+function showAddress(url) {
+  shownURL = url;
+  if (document.activeElement !== $("address")) $("address").value = short(url);
+}
+$("address").addEventListener("focus", () => {
+  const field = $("address");
+  if (shownURL && field.value === short(shownURL)) field.value = shownURL;
+  if (compact.matches) setTimeout(() => field.select(), 0);
+});
+$("address").addEventListener("blur", () => {
+  if ($("address").value === shownURL) $("address").value = short(shownURL);
+});
+
+let loadingTimer;
+function setLoading(on) {
+  $("loading").hidden = !on;
+  clearTimeout(loadingTimer);
+  if (on) loadingTimer = setTimeout(() => setLoading(false), 30000);
 }
 
 const bridge = createBridge({
@@ -400,11 +529,12 @@ const bridge = createBridge({
       visited.push(url);
       index = visited.length - 1;
     }
-    if (document.activeElement !== $("address")) $("address").value = url;
+    showAddress(url);
+    setLoading(false);
     rememberAddress(url);
     refreshControls();
   },
-  onError: (message) => debug("error", message),
+  onError: (message) => { setLoading(false); debug("error", message); },
   onSuperseded: () => {
     superseded = true;
     stopped("Porthole is open in another tab", "Only one tab can browse at a time, and a newer one took over. This tab is still signed in.");
@@ -422,6 +552,7 @@ showPendingTarget();
 function showHome() {
   $("frame").hidden = true;
   $("home").hidden = false;
+  setLoading(false);
   refreshControls();
 }
 
@@ -430,9 +561,10 @@ async function navigate(input) {
   let url;
   try { url = parseAddress(input); } catch { notify("That doesn't look like an address. Try a device name, like nas, or nas:8080."); return; }
   $("notice").hidden = true;
-  $("address").value = url.href;
+  showAddress(url.href);
   $("home").hidden = true;
   $("frame").hidden = false;
+  setLoading(true);
   refreshControls();
   try {
     await bridge.go(url);
@@ -450,7 +582,8 @@ function step(delta) {
 
 $("addressForm").addEventListener("submit", (ev) => {
   ev.preventDefault();
-  if ($("address").value.trim()) { $("address").blur(); navigate($("address").value); }
+  const typed = $("address").value.trim();
+  if (typed) { $("address").blur(); navigate(typed); }
 });
 $("homeBtn").addEventListener("click", () => { rememberAddress(""); showHome(); });
 
