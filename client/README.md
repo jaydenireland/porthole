@@ -63,17 +63,32 @@ run in one visible Safari tab would settle it.
 
 In the order it needs doing:
 
-1. Running the app with `?client=rust` against a real tailnet, and fixing
-   what it turns up.
-2. Answering the control server's pings, and reconnecting when the control
-   connection or a relay drops. Today the app shows "Porthole stopped".
-3. Speed, measured against the Go client on real sites. Connections are
-   now reused, responses are asked for gzip-compressed, and TCP buffers are
-   128 KB, but none of that has been timed on a real tailnet.
-4. Timers: the TCP stack and WireGuard rely on the page's timers, which
-   browsers slow down in hidden tabs. The Go client has the same weakness.
-5. Building for the oldest browsers we can reach, and running a size
-   optimizer.
+1. Checking on a real tailnet: WebSockets and logins on real sites, "Stay
+   signed in", signing out, a second tab, and reconnecting after the phone
+   sleeps or changes network.
+2. Desktop Safari, in one visible tab.
+3. Building for the oldest browsers we can reach, which is the reason for
+   this client and has not been started: Rust's default WebAssembly
+   features and untranspiled page scripts put the floor about where the Go
+   client's is.
+4. A build for the public site without the checks and logging, through a
+   size optimizer.
+5. Removing the Go client.
+
+Known gaps in recovery: a relay connection that dies without the browser
+noticing is not detected (the library hides the relay's keep-alives), and
+if the home relay stays unreachable the client keeps trying it instead of
+choosing another.
+
+## Decided, and why
+
+- **Subnet routers are out of scope.** Only devices' own tailnet addresses
+  are reachable, not addresses behind a device that routes for others.
+- **Tailnet lock is out of scope.** tailscale-rs does not check tailnet lock
+  signatures, so a tailnet that uses it gets no protection from it here.
+- **The tailnet's access rules are not applied to arriving packets.** The
+  tab never accepts connections, so a packet that is not part of one we
+  opened has no socket to go to. `engine.rs` has the details.
 
 ## Build and test
 
@@ -115,7 +130,8 @@ and applies `tailscale-rs.patch`. After changing files there, run
 | `src/http.rs` | HTTP requests over a connection that is kept for the next one, with the body read a piece at a time and gzip unpacked. |
 | `src/tls.rs` | TLS settings and certificate checking. |
 | `src/cookies.rs` | the cookie jar, with a browser's rules for scripts. |
-| `src/selftest.rs` | the checks the test page runs: `relayCheck()`, `pathCheck()`, `siteCheck()`, `pairedClient()`. |
+| `src/selftest.rs` | the checks the test page runs: `relayCheck()`, `pathCheck()`, `recoveryCheck()`, `siteCheck()`, `netmapCheck()`, `pairedClient()`. |
+| `src/timer.rs` | waiting, done in a worker so hidden tabs do not stall. |
 | `../web/app/rust-client.js` | gives this client the Go client's interface, for the app. |
 | `src/control.rs` | the control server connection over a WebSocket. |
 | `src/engine.rs` | joins the TCP/IP stack, WireGuard and the relays, and runs them on the page's event loop. |

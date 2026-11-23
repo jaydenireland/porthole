@@ -101,7 +101,7 @@ impl Connection {
                 Err(error) => {
                     let Some(wait) = waits.next() else { return Err(error) };
                     tracing::warn!(%error, wait_ms = wait, "could not reach the control server; trying again");
-                    gloo_timers::future::TimeoutFuture::new(*wait).await;
+                    crate::timer::sleep_ms(*wait).await;
                 }
             }
         }
@@ -218,6 +218,17 @@ impl Connection {
             .await
             .map_err(|e| Error::Netmap(e.to_string()))?;
         Ok(())
+    }
+
+    /// Answer a ping from the control server, if `update` carries one. The
+    /// server uses these to check on a device.
+    pub async fn answer_ping(&self, config: &Config, update: &StateUpdate) {
+        if update.ping.is_none() {
+            return;
+        }
+        if let Err(error) = control::handle_ping(update, &config.server_url, &self.http).await {
+            tracing::warn!(%error, "could not answer the control server's ping");
+        }
     }
 
     /// Start receiving the tailnet's state: this device, the others, the

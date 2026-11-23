@@ -145,6 +145,7 @@ where
 
 /// Send `request` over `stream` and wait for the start of the response. The
 /// connection is closed when the response has been read.
+#[cfg(test)]
 pub async fn send<Io>(stream: Io, request: Request) -> Result<(Head, Body), Error>
 where
     Io: AsyncRead + AsyncWrite + Unpin + 'static,

@@ -27,7 +27,7 @@ const STEP_LIMIT_MS: u32 = 10_000;
 /// Resolves to `step`'s result, or to an error if it takes too long.
 async fn limited<T>(what: &'static str, step: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
     use futures_util::future::{Either, select};
-    let limit = gloo_timers::future::TimeoutFuture::new(STEP_LIMIT_MS);
+    let limit = crate::timer::sleep_ms(STEP_LIMIT_MS);
     match select(std::pin::pin!(step), limit).await {
         Either::Left((result, _)) => result,
         Either::Right(_) => Err(Error::TimedOut(what)),
@@ -114,7 +114,31 @@ pub(crate) struct Inner {
     keep: RefCell<Option<Box<dyn std::any::Any>>>,
 }
 
+/// How long the control server may be silent before the connection is taken
+/// for dead. It sends something at least once a minute.
+const QUIET_LIMIT_MS: u32 = 150_000;
+
+type Updates = std::pin::Pin<Box<dyn futures_util::Stream<Item = ts_control::StateUpdate>>>;
+
 impl Inner {
+    /// Connect to the control server again after the connection was lost,
+    /// and start receiving updates again. `None` means the device is no
+    /// longer signed in.
+    async fn reconnect(&self) -> Result<Option<(Rc<Connection>, Updates)>, Error> {
+        self.connection.borrow_mut().take();
+        let connection = self.connection().await?;
+        match connection.register(&self.config, &self.keys, None).await? {
+            Registration::Authorized => {}
+            Registration::NeedsSignIn(_) | Registration::NeedsApproval => return Ok(None),
+        }
+        let updates = connection.updates(&self.config, &self.keys).await?;
+        // The new connection does not know where other devices reach us.
+        if let Some(region) = self.home_relay.get().filter(|region| *region != 0) {
+            connection.set_home_relay(&self.config, &self.keys, region).await?;
+        }
+        Ok(Some((connection, Box::pin(updates))))
+    }
+
     /// Bring the engine in line with the latest picture of the tailnet.
     async fn sync_engine(self: &Rc<Self>) {
         let (addresses, relays, peers) = {
@@ -139,7 +163,7 @@ impl Inner {
                 let mut wait_ms = 1000;
                 while let Err(error) = this.choose_home_relay(&relays).await {
                     tracing::warn!(%error, wait_ms, "could not set a home relay; other devices cannot answer yet");
-                    gloo_timers::future::TimeoutFuture::new(wait_ms).await;
+                    crate::timer::sleep_ms(wait_ms).await;
                     wait_ms = (wait_ms * 2).min(15_000);
                 }
             });
@@ -291,7 +315,7 @@ impl Client {
                             let _ = callback.call0(&JsValue::NULL);
                         }
                     }
-                    gloo_timers::future::sleep(std::time::Duration::from_secs(3)).await;
+                    crate::timer::sleep_ms(3000).await;
                 }
             }
         }
@@ -327,8 +351,10 @@ impl Client {
     }
 
     /// Start following the tailnet. `on_devices` is called with the device
-    /// list as JSON (`{ self: {...}, peers: [...] }`) whenever it changes,
-    /// and `on_closed` once if the control server stops sending updates.
+    /// list as JSON (`{ self: {...}, peers: [...] }`) whenever it changes.
+    /// If the connection to the control server is lost it is made again;
+    /// `on_closed` is called once, and only if the device turns out to be
+    /// signed out.
     /// Resolves when the first request has been accepted. The device must be
     /// signed in.
     pub async fn watch(
@@ -340,24 +366,62 @@ impl Client {
         if !inner.signed_in.get() {
             return Err(Error::NotSignedIn);
         }
-        let connection = inner.connection().await?;
-        let updates = connection.updates(&inner.config, &inner.keys).await?;
+        let mut connection = inner.connection().await?;
+        let mut updates: Updates = Box::pin(connection.updates(&inner.config, &inner.keys).await?);
         wasm_bindgen_futures::spawn_local(async move {
-            let mut updates = std::pin::pin!(updates);
-            while let Some(update) = updates.next().await {
-                let changed = inner.net.netmap.borrow_mut().apply(update);
-                inner.sync_engine().await;
-                if !changed {
-                    continue;
+            use futures_util::future::{Either, select};
+            loop {
+                // Take updates until the connection ends or goes quiet.
+                loop {
+                    let quiet = crate::timer::sleep_ms(QUIET_LIMIT_MS);
+                    let update = match select(updates.next(), quiet).await {
+                        Either::Left((Some(update), _)) => update,
+                        Either::Left((None, _)) => {
+                            tracing::warn!("the control connection ended");
+                            break;
+                        }
+                        Either::Right(_) => {
+                            tracing::warn!("the control server has been silent for too long");
+                            break;
+                        }
+                    };
+                    connection.answer_ping(&inner.config, &update).await;
+                    let changed = inner.net.netmap.borrow_mut().apply(update);
+                    inner.sync_engine().await;
+                    if !changed {
+                        continue;
+                    }
+                    let json = inner.net.netmap.borrow().to_json();
+                    if let Some(json) = json {
+                        // A page callback that throws must not stop the updates.
+                        drop(on_devices.call1(&JsValue::NULL, &json.into()));
+                    }
                 }
-                let json = inner.net.netmap.borrow().to_json();
-                if let Some(json) = json {
-                    // A page callback that throws must not stop the updates.
-                    drop(on_devices.call1(&JsValue::NULL, &json.into()));
+
+                // Connect again, a little less eagerly each time. Connections
+                // to devices do not go through the control server, so they
+                // carry on meanwhile.
+                let mut wait_ms = 1000;
+                loop {
+                    crate::timer::sleep_ms(wait_ms).await;
+                    wait_ms = (wait_ms * 2).min(30_000);
+                    match inner.reconnect().await {
+                        Ok(Some((again, stream))) => {
+                            tracing::info!("reconnected to the control server");
+                            connection = again;
+                            updates = stream;
+                            break;
+                        }
+                        Ok(None) => {
+                            tracing::warn!("this device is no longer signed in");
+                            inner.signed_in.set(false);
+                            drop(on_closed.call0(&JsValue::NULL));
+                            return;
+                        }
+                        Err(error) => tracing::warn!(%error, wait_ms, "could not reconnect to the control server"),
+                    }
                 }
             }
-            tracing::info!("the control server stopped sending updates");
-            drop(on_closed.call0(&JsValue::NULL));
         });
         Ok(())
     }
@@ -464,6 +528,14 @@ pub async fn paired_client(host: String) -> Result<Client, Error> {
 #[wasm_bindgen(js_name = netmapCheck)]
 pub async fn netmap_check() -> Result<String, Error> {
     crate::selftest::netmap().await
+}
+
+/// Diagnostic: resolves if two throwaway devices can talk again after both
+/// lose their relay connections. Needs no sign-in.
+#[cfg(feature = "diagnostics")]
+#[wasm_bindgen(js_name = recoveryCheck)]
+pub async fn recovery_check(host: String) -> Result<(), Error> {
+    crate::selftest::recovery(&host).await
 }
 
 /// Diagnostic: resolves if this browser can pass a packet through the relay

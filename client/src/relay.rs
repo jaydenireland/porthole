@@ -56,6 +56,7 @@ impl Relay {
 /// Checks that packets can cross a relay from this browser: two throwaway
 /// devices connect to `host` and one sends the other a packet. Needs no
 /// sign-in, because Tailscale's relays accept any device key.
+#[cfg(feature = "diagnostics")]
 pub async fn check(host: &str) -> Result<(), Error> {
     const NOTE: &[u8] = b"porthole relay check";
     let (a, b) = (NodeKeyPair::random(), NodeKeyPair::random());
@@ -92,7 +93,7 @@ pub async fn nearest(hosts: &std::collections::HashMap<u32, String>) -> Option<u
                 .map(|_| region)
         })
     });
-    let limit = gloo_timers::future::TimeoutFuture::new(PROBE_LIMIT_MS);
+    let limit = crate::timer::sleep_ms(PROBE_LIMIT_MS);
     match select(select_ok(probes), limit).await {
         Either::Left((Ok((region, _slower)), _)) => Some(region),
         Either::Left((Err(error), _)) => {

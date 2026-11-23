@@ -141,6 +141,36 @@ pub async fn netmap() -> Result<String, Error> {
     netmap.to_json().ok_or_else(|| failed("there was no device list to show"))
 }
 
+/// Recovery: both devices lose their relay connections, as they would when
+/// a phone changes networks, and must find each other again by themselves.
+pub async fn recovery(relay: &str) -> Result<(), Error> {
+    let Pair { a, b, address_b } = pair(relay).await?;
+    let listener = b.listen(80).await?;
+    let exchange = || async {
+        let server = async {
+            let stream = listener.accept().await.map_err(|e| Error::Network(e.to_string()))?;
+            let mut request = [0u8; 4];
+            read_exact(&stream, &mut request).await?;
+            write_all(&stream, b"pong").await
+        };
+        let client = async {
+            let stream = a.connect(SocketAddr::new(address_b, 80)).await?;
+            write_all(&stream, b"ping").await?;
+            let mut answer = [0u8; 4];
+            read_exact(&stream, &mut answer).await?;
+            if &answer == b"pong" { Ok(()) } else { Err(failed("the answer was something else")) }
+        };
+        let (served, answered) = futures_util::future::join(server, client).await;
+        served.and(answered)
+    };
+    exchange().await?;
+    a.cut_relays();
+    b.cut_relays();
+    // Nothing tells the devices to reconnect; the next connection just has
+    // to work, once both are back on the relay.
+    exchange().await
+}
+
 /// Reaches the second device whatever name is asked for.
 struct Direct {
     engine: Rc<Engine>,

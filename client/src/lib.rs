@@ -38,8 +38,10 @@ mod selftest;
 mod socket;
 #[cfg(target_arch = "wasm32")]
 mod tab;
+#[cfg(target_arch = "wasm32")]
+mod timer;
 
 #[cfg(target_arch = "wasm32")]
 pub use tab::Client;
 #[cfg(all(target_arch = "wasm32", feature = "diagnostics"))]
-pub use tab::{netmap_check, paired_client, path_check, relay_check, site_check};
+pub use tab::{netmap_check, paired_client, path_check, recovery_check, relay_check, site_check};

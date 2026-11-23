@@ -43,7 +43,7 @@ use ts_keys::{NodeKeyPair, NodePublicKey};
 use ts_netstack_smoltcp::{
     CreateSocket, Netstack, WakingPipe, WakingPipeDev, WakingPipeSender,
     netcore::{Channel, Config as StackConfig, HasChannel, NetstackControl},
-    netsock::{TcpListener, TcpStream},
+    netsock::TcpStream,
     smoltcp,
 };
 use ts_packet::PacketMut;
@@ -112,6 +112,10 @@ struct Inner {
     /// this set changed.
     relays_up: RefCell<HashSet<u32>>,
     relay_waiters: RefCell<Vec<oneshot::Sender<()>>>,
+    /// The region other devices reach us on, whose connection is kept up.
+    home: Cell<Option<u32>>,
+    /// Counts requests to drop every relay connection.
+    cuts: Cell<u32>,
     addresses: RefCell<Vec<IpAddr>>,
     next_port: Cell<u16>,
     tasks: RefCell<Vec<AbortHandle>>,
@@ -148,7 +152,6 @@ impl Inner {
             self.relays_up.borrow_mut().insert(region);
         } else {
             self.relays_up.borrow_mut().remove(&region);
-            self.relays.borrow_mut().remove(&region);
         }
         for waiter in self.relay_waiters.borrow_mut().drain(..) {
             let _ = waiter.send(());
@@ -188,45 +191,72 @@ impl Inner {
 
         let this = self.clone();
         self.spawn(async move {
-            let relay = match Relay::connect(&host, &this.keys).await {
-                Ok(relay) => Rc::new(relay),
-                Err(error) => {
-                    tracing::warn!(%error, relay = host, "could not reach relay");
+            let mut retry_ms = 500;
+            loop {
+                match Relay::connect(&host, &this.keys).await {
+                    Ok(relay) => {
+                        retry_ms = 500;
+                        this.relay_changed(region, true);
+                        this.run_relay(Rc::new(relay), &mut queued).await;
+                        this.relay_changed(region, false);
+                    }
+                    Err(error) => tracing::warn!(%error, relay = host, "could not reach relay"),
+                }
+                // The home relay is the only way other devices can reach us,
+                // so that connection is made again, for as long as it takes.
+                // Any other is made again when there is next something to
+                // send through it.
+                if this.home.get() != Some(region) {
+                    this.relays.borrow_mut().remove(&region);
                     this.relay_changed(region, false);
                     return;
                 }
-            };
+                tracing::warn!(relay = host, retry_ms, "home relay connection lost; connecting again");
+                crate::timer::sleep_ms(retry_ms).await;
+                retry_ms = (retry_ms * 2).min(15_000);
+            }
+        });
+        Some(queue)
+    }
 
-            this.relay_changed(region, true);
-
-            let incoming = {
-                let (this, relay) = (this.clone(), relay.clone());
-                async move {
-                    loop {
-                        match relay.recv().await {
-                            Ok((_from, packet)) => this.received(packet),
-                            Err(error) => {
-                                tracing::warn!(%error, "relay connection ended");
-                                return;
-                            }
-                        }
-                    }
-                }
-            };
-            let outgoing = async {
-                while let Some((to, packet)) = queued.next().await {
-                    if let Err(error) = relay.send(to, packet.as_ref()).await {
-                        tracing::warn!(%error, "could not send to relay");
+    /// Pass packets both ways over an open relay connection until it fails.
+    async fn run_relay(
+        self: &Rc<Self>,
+        relay: Rc<Relay>,
+        queued: &mut mpsc::UnboundedReceiver<(NodePublicKey, PacketMut)>,
+    ) {
+        let incoming = async {
+            loop {
+                match relay.recv().await {
+                    Ok((_from, packet)) => self.received(packet),
+                    Err(error) => {
+                        tracing::warn!(%error, "relay connection ended");
                         return;
                     }
                 }
-            };
-            // Whichever direction fails first ends the connection; the next
-            // packet for this region opens a new one.
-            select(std::pin::pin!(incoming), std::pin::pin!(outgoing)).await;
-            this.relay_changed(region, false);
-        });
-        Some(queue)
+            }
+        };
+        let outgoing = async {
+            while let Some((to, packet)) = queued.next().await {
+                if let Err(error) = relay.send(to, packet.as_ref()).await {
+                    tracing::warn!(%error, "could not send to relay");
+                    return;
+                }
+            }
+        };
+        // Asked to drop the connection (only the checks do this).
+        let cut = async {
+            let asked = self.cuts.get();
+            while self.cuts.get() == asked {
+                let (waiter, changed) = oneshot::channel();
+                self.relay_waiters.borrow_mut().push(waiter);
+                let _ = changed.await;
+            }
+        };
+        // Whichever ends first ends the connection.
+        let (incoming, outgoing, cut) =
+            (std::pin::pin!(incoming), std::pin::pin!(outgoing), std::pin::pin!(cut));
+        select(select(incoming, outgoing), cut).await;
     }
 
     /// An encrypted packet arrived from a relay.
@@ -274,6 +304,8 @@ impl Engine {
             relays: RefCell::default(),
             relays_up: RefCell::default(),
             relay_waiters: RefCell::default(),
+            home: Cell::new(None),
+            cuts: Cell::new(0),
             addresses: RefCell::default(),
             // The range set aside for short-lived ports.
             next_port: Cell::new(49152),
@@ -282,7 +314,7 @@ impl Engine {
 
         // The stack's own loop: timers, retransmissions, socket commands.
         inner.spawn(async move {
-            stack.run_with_sleep(async |wait| gloo_timers::future::sleep(wait).await).await;
+            stack.run_with_sleep(async |wait| crate::timer::sleep(wait).await).await;
         });
 
         // Packets the stack wants sent.
@@ -302,7 +334,7 @@ impl Engine {
                     Some(at) => at.saturating_duration_since(web_time::Instant::now()),
                     None => Duration::from_secs(3600),
                 };
-                let sleep = std::pin::pin!(gloo_timers::future::sleep(wait));
+                let sleep = std::pin::pin!(crate::timer::sleep(wait));
                 match select(sleep, rescheduled.next()).await {
                     Either::Left(_) => {
                         let due = this.dataplane.borrow_mut().process_events();
@@ -325,19 +357,28 @@ impl Engine {
     /// Connect to our home relay, where other devices send to us. Resolves
     /// once the relay knows we are there.
     pub async fn listen_on(&self, region: u32) -> Result<(), Error> {
+        self.inner.home.set(Some(region));
         if self.inner.relay(region).is_none() {
             return Err(Error::Relay(format!("no relay is known for region {region}")));
         }
+        // The connection is retried until it works, so this waits as long
+        // as that takes; callers that cannot wait put a limit on it.
         loop {
             if self.inner.relays_up.borrow().contains(&region) {
                 return Ok(());
             }
-            if !self.inner.relays.borrow().contains_key(&region) {
-                return Err(Error::Relay(format!("could not reach the relay for region {region}")));
-            }
             let (waiter, changed) = oneshot::channel();
             self.inner.relay_waiters.borrow_mut().push(waiter);
             let _ = changed.await;
+        }
+    }
+
+    /// Drop every relay connection, as a network change would. For the checks.
+    #[cfg(feature = "diagnostics")]
+    pub fn cut_relays(&self) {
+        self.inner.cuts.set(self.inner.cuts.get() + 1);
+        for waiter in self.inner.relay_waiters.borrow_mut().drain(..) {
+            let _ = waiter.send(());
         }
     }
 
@@ -423,7 +464,8 @@ impl Engine {
 
     /// Accept TCP connections on `port`. The app never does this; it exists
     /// so two engines can be tested against each other.
-    pub async fn listen(&self, port: u16) -> Result<TcpListener, Error> {
+    #[cfg(feature = "diagnostics")]
+    pub async fn listen(&self, port: u16) -> Result<ts_netstack_smoltcp::netsock::TcpListener, Error> {
         let address = *self
             .inner
             .addresses

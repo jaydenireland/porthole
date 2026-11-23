@@ -22,7 +22,7 @@ if (reporting) {
   addEventListener("unhandledrejection", (ev) => stage("unhandled rejection: " + (ev.reason?.message ?? ev.reason)));
 }
 try {
-  const { default: init, Client, relayCheck, pathCheck, siteCheck, pairedClient, netmapCheck } = await import("/client/porthole_client.js");
+  const { default: init, Client, relayCheck, pathCheck, siteCheck, pairedClient, netmapCheck, recoveryCheck } = await import("/client/porthole_client.js");
   const wasm = await init();
   out.loadedMs = ms();
   stage("loaded");
@@ -64,6 +64,16 @@ try {
   out.pathMs = ms() - pathStart;
   out.pathOk = true;
   stage("path");
+  // Both devices lose their relay connections and must recover unaided.
+  const recoveryStart = ms();
+  await Promise.race([
+    recoveryCheck("derp1.tailscale.com"),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("recovery check timed out after 40 s")), 40000)),
+  ]);
+  out.recoveryMs = ms() - recoveryStart;
+  out.recoveryOk = true;
+  stage("recovery");
+
   // What pages use: HTTP, HTTPS with the certificate checked, a cookie kept
   // and sent back, and a WebSocket, all between the two devices.
   const siteStart = ms();
@@ -156,7 +166,7 @@ try {
   out.frameOk = true;
   paired.free();
   out.wasmMemoryMB = Math.round(wasm.memory.buffer.byteLength / 1048576 * 10) / 10;
-  out.ok = out.gotSignInAddress === true && out.deviceListOk === true && out.relayOk === true && out.pathOk === true && out.siteOk === true && out.apiOk === true && out.frameOk === true;
+  out.ok = out.gotSignInAddress === true && out.deviceListOk === true && out.recoveryOk === true && out.relayOk === true && out.pathOk === true && out.siteOk === true && out.apiOk === true && out.frameOk === true;
 } catch (e) {
   out.ok = false;
   out.error = String(e && e.message || e);

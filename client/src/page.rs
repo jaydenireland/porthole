@@ -273,7 +273,7 @@ async fn run_socket(
     };
 
     // Once we have said goodbye, how long the other end has to answer.
-    let mut deadline: Option<std::pin::Pin<Box<gloo_timers::future::TimeoutFuture>>> = None;
+    let mut deadline: Option<std::pin::Pin<Box<crate::timer::Sleep>>> = None;
     loop {
         let incoming = socket.next();
         let event = match deadline.as_mut() {
@@ -331,7 +331,7 @@ async fn run_socket(
             }
             Either::Right(Some(Outgoing::Close(frame))) => {
                 let _ = socket.close(frame).await;
-                deadline = Some(Box::pin(gloo_timers::future::sleep(CLOSE_WAIT)));
+                deadline = Some(Box::pin(crate::timer::sleep(CLOSE_WAIT)));
             }
             // The send queue overflowed and was shut.
             Either::Right(None) => {
