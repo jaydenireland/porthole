@@ -85,8 +85,29 @@ fn is_local(url: &Url) -> bool {
     matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
 }
 
+/// How long to wait before each further attempt to reach the control server.
+const RETRY_AFTER_MS: [u32; 3] = [300, 1000, 2500];
+
 impl Connection {
+    /// Connect to the control server, trying again a few times if an attempt
+    /// fails. A connection can fail for reasons that pass in a moment (a
+    /// phone changing networks, a server restarting), and giving up at once
+    /// leaves the page with nothing to do but ask for a reload.
     pub async fn open(control_url: &Url, machine_keys: &MachineKeyPair) -> Result<Self, Error> {
+        let mut waits = RETRY_AFTER_MS.iter();
+        loop {
+            match Self::open_once(control_url, machine_keys).await {
+                Ok(connection) => return Ok(connection),
+                Err(error) => {
+                    let Some(wait) = waits.next() else { return Err(error) };
+                    tracing::warn!(%error, wait_ms = wait, "could not reach the control server; trying again");
+                    gloo_timers::future::TimeoutFuture::new(*wait).await;
+                }
+            }
+        }
+    }
+
+    async fn open_once(control_url: &Url, machine_keys: &MachineKeyPair) -> Result<Self, Error> {
         let control_key = fetch_control_key(control_url).await?;
 
         let (handshake, first_message) = ts_control_noise::Handshake::initialize(
