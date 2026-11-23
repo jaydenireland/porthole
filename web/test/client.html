@@ -1,0 +1,41 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Client start test</title>
+<body style="font:14px/1.5 system-ui,sans-serif;color-scheme:light dark;padding:16px">
+<h1 style="font-size:18px">Client start test</h1>
+<p>Loads the Tailscale client in this browser, starts it, and asks Tailscale for a sign-in address. It does not sign in. Add <code>?report</code> to send the result to the server log.</p>
+<pre id="out">running…</pre>
+<script src="/node/wasm_exec.js"></script>
+<script>
+(async () => {
+  const out = { ua: navigator.userAgent, secure: window.isSecureContext, sw: "serviceWorker" in navigator };
+  const t0 = performance.now();
+  const ms = () => Math.round(performance.now() - t0);
+  try {
+    const go = new Go();
+    const { instance } = await WebAssembly.instantiateStreaming(fetch("/node/main.wasm"), go.importObject);
+    out.loadedMs = ms();
+    go.run(instance);
+    const ipn = newIPN({ hostname: "porthole-test", panicHandler: (e) => { out.panic = String(e); } });
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("timed out after 45 s; last state " + out.state)), 45000);
+      let asked = false;
+      ipn.run({
+        notifyState: (s) => { out.state = s; if (s === "NeedsLogin" && !asked) { asked = true; out.readyMs = ms(); ipn.login(); } },
+        notifyNetMap: () => {},
+        notifyBrowseToURL: (url) => { out.signInAddressMs = ms(); out.gotSignInAddress = /^https:\/\/login\.tailscale\.com\//.test(url); clearTimeout(timer); resolve(); },
+        notifyPanicRecover: (e) => { out.recovered = String(e); },
+      });
+    });
+    out.wasmMemoryMB = Math.round(instance.exports.mem.buffer.byteLength / 1048576);
+    out.ok = out.gotSignInAddress === true;
+  } catch (e) {
+    out.ok = false;
+    out.error = String(e && e.message || e);
+  }
+  document.getElementById("out").textContent = JSON.stringify(out, null, 2);
+  document.title = out.ok ? "CLIENT OK" : "CLIENT FAILED";
+  if (new URLSearchParams(location.search).has("report")) fetch("/test/report?" + new URLSearchParams({ suite: "client", ...out }));
+})();
+</script>
+</body>

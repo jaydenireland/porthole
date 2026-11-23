@@ -1,0 +1,14 @@
+# Tailscale source that web/build.sh fetches and patches. Our changes to it
+# are kept in web/tsconnect.patch.
+/tailscale-src/
+
+# The built Tailscale client. Run web/build.sh to produce it.
+/web/node/
+
+# Cloudflare build output and tooling
+node_modules/
+/cloudflare/dist/
+/cloudflare/.cache/
+.wrangler/
+
+.DS_Store

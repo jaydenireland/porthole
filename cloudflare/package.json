@@ -1,0 +1,13 @@
+{
+  "name": "porthole-cloudflare",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs && wrangler dev",
+    "deploy": "./deploy.sh"
+  },
+  "devDependencies": {
+    "wrangler": "^4.166.0"
+  }
+}

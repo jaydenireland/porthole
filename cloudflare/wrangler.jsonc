@@ -1,0 +1,31 @@
+{
+  // Porthole on Cloudflare: static files plus a small Worker.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "porthole",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-06-01",
+
+  // dist/ is produced by build.mjs from ../web.
+  // Static files are served directly; the Worker only runs for paths that
+  // are not files (the Tailscale client and the test report address).
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "404-page"
+  },
+
+  "routes": [
+    // The app itself. Cloudflare creates the DNS record and certificate.
+    { "pattern": "porthole.app", "custom_domain": true },
+    // One subdomain per tailnet site (see web/__tailnet/codec.js). Needs a
+    // proxied wildcard DNS record, which is a one-time manual step: see README.
+    { "pattern": "*.porthole.app/*", "zone_name": "porthole.app" }
+  ],
+
+  "workers_dev": false,
+  "preview_urls": false,
+
+  // Keeps test reports (GET /test/report) readable in the dashboard and
+  // with `npx wrangler tail`.
+  "observability": { "enabled": true }
+}

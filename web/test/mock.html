@@ -1,0 +1,344 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Service worker test (mock tailnet)</title>
+<body style="font:14px/1.5 system-ui,sans-serif;color-scheme:light dark;padding:16px">
+<h1 style="font-size:18px">Service worker test</h1>
+<p>Runs the bridge, relay and sw.js against fake in-page "tailnet sites" instead of the real node. No tailnet or login involved.</p>
+<pre id="out">running…</pre>
+<iframe id="frame" style="width:100%;height:160px;border:1px solid #888"></iframe>
+<script src="../__tailnet/codec.js"></script>
+<script type="module">
+import { createBridge, parseAddress, removeAppWorker } from "../app/bridge.js";
+
+const enc = (s) => new TextEncoder().encode(s);
+const dec = (b) => new TextDecoder().decode(b ?? new Uint8Array());
+const seen = [];       // every request the fake sites received
+const sockets = [];    // every websocket the fake node was asked to open
+const navigated = [];  // every onNavigated callback
+const errors = [];     // every onError callback
+let pausedRelease = null;
+let eventStreamCancelled = false;
+let nextId = 0;
+const posts = new Map();
+
+// Fake pages cannot be inspected from here (other origin), so they report.
+const REPORT = `<script>top.postMessage({ t: "page", title: document.title, href: location.href, path: location.pathname + location.search, body: document.getElementById("d")?.textContent ?? "" }, "*");<\/script>`;
+
+const HOME = `<!doctype html><title>Fake home</title>
+<script>window.cookieAtStart = document.cookie;<\/script>
+<link rel="stylesheet" href="/abs.css">
+<script src="rel.js"><\/script>
+<body>
+<a id="r" href="/redirect">redirect</a>
+<form id="f" method="post" action="/submit"><input name="q" value="héllo"></form>
+<script>
+addEventListener("load", async () => {
+  const out = { href: location.href, path: location.pathname, relLoaded: window.relLoaded === true, framed: top !== window };
+  out.color = getComputedStyle(document.body).color;
+  let r = await fetch("/api", { headers: { "X-Mine": "1" } });
+  out.api = { json: await r.json(), custom: r.headers.get("x-custom") };
+  r = await fetch("/api-redirect");
+  out.apiRedirect = { status: r.status, json: await r.json().catch(() => null) };
+  r = await fetch("/api", { method: "PUT", body: "x" });
+  out.put = await r.json();
+  r = await fetch("/bytes");
+  out.bytes = [...new Uint8Array(await r.arrayBuffer())].join();
+  out.nocontent = (await fetch("/nocontent")).status;
+  out.missing = (await fetch("/missing")).status;
+  out.crossSite = (await fetch("/to-other")).status;
+  out.compatMode = document.compatMode;
+  // Streaming: the first chunk must arrive while the response is still open.
+  out.stream = await (async () => {
+    const reader = (await fetch("/paused")).body.getReader();
+    const text = new TextDecoder();
+    const first = text.decode((await reader.read()).value);
+    await fetch("/release");
+    let rest = "";
+    for (;;) { const { value, done } = await reader.read(); if (done) break; rest += text.decode(value); }
+    return first + "|" + rest;
+  })();
+  out.sse = await new Promise((resolve) => {
+    const got = [];
+    const es = new EventSource("/events");
+    es.onmessage = (e) => { got.push(e.data); if (got.length === 2) { es.close(); resolve(got.join()); } };
+    es.onerror = () => { es.close(); resolve("error " + got.join()); };
+    setTimeout(() => resolve("timeout " + got.join()), 5000);
+  });
+  // Cookies: server-set at load, written by script, then set by a later response.
+  out.cookieAtStart = window.cookieAtStart;
+  document.cookie = "theme=dark; path=/";
+  out.cookieAfterSet = document.cookie;
+  out.sentAfterSet = (await (await fetch("/cookie-echo")).json()).cookie;
+  await fetch("/set-fresh");
+  for (let i = 0; i < 40 && !document.cookie.includes("fresh=1"); i++) await new Promise((r) => setTimeout(r, 25));
+  out.cookieAfterResponse = document.cookie;
+  document.cookie = "theme=; path=/; max-age=0";
+  out.cookieAfterDelete = document.cookie;
+  document.cookie = "sneaky=1; HttpOnly";
+  out.cookieAfterHttpOnly = document.cookie;
+  out.ws = await new Promise((resolve) => {
+    const log = [];
+    const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/echo?x=1", ["p1", "p2"]);
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => log.push("open " + ws.protocol + " " + ws.readyState);
+    ws.addEventListener("message", (e) => {
+      log.push(typeof e.data === "string" ? "text " + e.data : "binary " + [...new Uint8Array(e.data)].join());
+      if (e.data === "hello") { ws.send("héllo"); ws.send(new Uint8Array([0, 255, 7])); ws.send(new Blob(["blob"])); }
+      if (log.length === 5) ws.close(4001, "bye");
+    });
+    ws.onclose = (e) => { log.push("close " + e.code + " " + e.wasClean + " " + ws.readyState); resolve(log); };
+    setTimeout(() => resolve(log.concat("timeout")), 5000);
+  });
+  // A socket to some other host is left to the browser.
+  const foreign = new WebSocket("ws://127.0.0.1:9/");
+  out.foreignIsNative = foreign.constructor !== WebSocket;
+  foreign.onerror = () => {};
+  foreign.close();
+  // Asking the app directly for a socket to another tailnet host must be refused.
+  out.forged = await new Promise((resolve) => {
+    const ch = new MessageChannel();
+    ch.port1.onmessage = (e) => { if (e.data.t === "close") resolve("close " + e.data.code); if (e.data.t === "open") resolve("open"); };
+    top.postMessage({ type: "tailnet-websocket", url: "ws://other.ts.net:8080/x", protocols: [] }, "*", [ch.port2]);
+    setTimeout(() => resolve("timeout"), 3000);
+  });
+  top.postMessage({ t: "home", out }, "*");
+  const action = new URLSearchParams(location.search).get("do");
+  if (action === "link") document.getElementById("r").click();
+  if (action === "form") document.getElementById("f").submit();
+  if (action === "cross") location.href = "/to-other";
+});
+<\/script>`;
+
+// Mirrors the node's request() contract.
+async function fakeSites(req) {
+  seen.push(req);
+  const u = new URL(req.url);
+  const reply = (status, headers, body = "") => ({ status, statusText: "", url: req.url, headers, body: enc(body) });
+  const html = (body) => reply(200, [["Content-Type", "text/html; charset=utf-8"]], body);
+  if (u.hostname === "down.ts.net") throw new Error("dial tcp: host is down");
+  if (u.origin === "http://other.ts.net:8080") return html(`<title>Other</title><body>other site ${u.pathname}${REPORT}`);
+  if (u.origin !== "http://fake.ts.net") return reply(404, [], "wrong origin " + u.origin);
+  switch (u.pathname) {
+    case "/":
+      return reply(200, [
+        ["Content-Type", "text/html; charset=utf-8"],
+        ["X-Frame-Options", "DENY"],
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"],
+        ["Content-Length", "999999"],
+        ["Set-Cookie", "csrftoken=abc; Path=/"],
+        ["Set-Cookie", "sid=secret; Path=/; HttpOnly"],
+      ], HOME);
+    case "/cookie-echo": return reply(200, [["Content-Type", "application/json"]], JSON.stringify({ cookie: req.cookieHeader }));
+    case "/set-fresh": return reply(204, [["Set-Cookie", "fresh=1; Path=/"]]);
+    case "/paused": {
+      // "one" now, "two" only after /release is requested.
+      let release;
+      const released = new Promise((r) => { release = r; });
+      pausedRelease = release;
+      const steps = [async () => enc("one"), async () => { await released; return enc("two"); }];
+      return { ...reply(200, [["Content-Type", "text/plain"]]), read: () => (steps.shift() ?? (async () => null))(), cancel() {} };
+    }
+    case "/release": pausedRelease?.(); return reply(204, []);
+    case "/events": {
+      // Two events, then silence until the reader goes away.
+      const events = [enc("data: a\n\n"), enc("data: b\n\n")];
+      let hangUp;
+      const gone = new Promise((r) => { hangUp = r; });
+      return {
+        ...reply(200, [["Content-Type", "text/event-stream"]]),
+        read: () => (events.length ? Promise.resolve(events.shift()) : gone),
+        cancel() { eventStreamCancelled = true; hangUp(null); },
+      };
+    }
+    case "/abs.css": return reply(200, [["Content-Type", "text/css"]], "body{color:rgb(1,2,3)}");
+    case "/rel.js": return reply(200, [["Content-Type", "text/javascript"]], "window.relLoaded = true;");
+    case "/api": return reply(200, [["Content-Type", "application/json"], ["X-Custom", "yes"]], JSON.stringify({ ok: true, method: req.method }));
+    case "/api-redirect": return reply(302, [["Location", "/api"]]);
+    case "/bytes": return { status: 200, statusText: "", url: req.url, headers: [["Content-Type", "application/octet-stream"]], body: new Uint8Array([0, 255, 128, 7]) };
+    case "/nocontent": return reply(204, []);
+    case "/redirect": return reply(302, [["Location", "/landed?from=redirect"]]);
+    case "/landed": return html(`<title>Landed</title><body>landed${REPORT}`);
+    case "/submit": {
+      const id = String(nextId++);
+      posts.set(id, { method: req.method, body: dec(req.body), type: req.headers.find(([k]) => k.toLowerCase() === "content-type")?.[1] });
+      return reply(303, [["Location", "http://fake.ts.net/posted?id=" + id]]);
+    }
+    case "/posted": return html(`<title>Posted</title><body><pre id="d">${JSON.stringify(posts.get(u.searchParams.get("id")))}</pre>${REPORT}`);
+    case "/to-other": return reply(302, [["Location", "http://other.ts.net:8080/hello"]]);
+    default: return reply(404, [["Content-Type", "text/plain"]], "not found");
+  }
+}
+
+// Stands in for the node's cookie jar: one flat jar per origin, with HttpOnly
+// cookies kept apart (the real rules are tested in Go, in cookies_js_test.go).
+const jars = new Map();  // origin -> { script: Map, httpOnly: Map }
+const cookieSets = [];   // every cookies.set call
+const jarFor = (url) => {
+  const origin = new URL(url).origin;
+  if (!jars.has(origin)) jars.set(origin, { script: new Map(), httpOnly: new Map() });
+  return jars.get(origin);
+};
+const join = (map) => [...map].map(([k, v]) => k + "=" + v).join("; ");
+function store(url, line, fromScript) {
+  const [pair, ...attributes] = line.split(";");
+  const [name, value = ""] = pair.split("=").map((x) => x.trim());
+  const flags = attributes.map((a) => a.trim().toLowerCase());
+  const jar = jarFor(url);
+  if (flags.includes("httponly")) { if (!fromScript) jar.httpOnly.set(name, value); return; }
+  if (flags.includes("max-age=0")) jar.script.delete(name); else jar.script.set(name, value);
+}
+const fakeCookies = {
+  get: (url) => join(jarFor(url).script),
+  set: (url, text) => { cookieSets.push({ url, text }); store(url, text, true); },
+};
+// The node attaches cookies to requests and stores the ones in responses.
+async function fakeNode(req) {
+  const jar = jarFor(req.url);
+  req.cookieHeader = [join(jar.httpOnly), join(jar.script)].filter(Boolean).join("; ");
+  const res = await fakeSites(req);
+  for (const [k, v] of res.headers) if (k.toLowerCase() === "set-cookie") store(req.url, v, false);
+  if (res.read) return res;
+  // Like the node, hand the body over through read(): one chunk, then the end.
+  const chunks = [res.body];
+  return { ...res, body: undefined, read: async () => chunks.shift() ?? null, cancel() {} };
+}
+
+// Mirrors the node's websocket() contract with an echo server.
+function fakeSocket(options) {
+  sockets.push(options);
+  const later = (f) => setTimeout(f, 0);
+  later(() => { options.onOpen(options.protocols.includes("p2") ? "p2" : ""); options.onMessage("hello"); });
+  return {
+    send: (d) => later(() => options.onMessage(d)),
+    close: (code) => later(() => options.onClose(code ?? 1005, "", true)),
+  };
+}
+
+const results = [];
+const check = (name, ok, detail = "") => results.push(`${ok ? "PASS" : "FAIL"}  ${name}${ok ? "" : "  : " + (typeof detail === "string" ? detail : JSON.stringify(detail))}`);
+const header = (req, name) => req?.headers.find(([k]) => k.toLowerCase() === name)?.[1];
+const lastSeen = (path) => seen.findLast((r) => new URL(r.url).pathname === path);
+
+// Wait for a message from a fake page.
+function next(pred, what) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { removeEventListener("message", on); reject(new Error("timed out waiting for " + what)); }, 10000);
+    function on(ev) {
+      if (!ev.data || !pred(ev.data)) return;
+      clearTimeout(timer);
+      removeEventListener("message", on);
+      resolve({ ...ev.data, origin: ev.origin });
+    }
+    addEventListener("message", on);
+  });
+}
+
+async function run() {
+  const C = TailnetCodec;
+  check("label codec round-trip",
+    C.encodeLabel(new URL("http://Fake.ts.net/x")) === "fake--ts--net--h" &&
+    C.encodeLabel(new URL("https://nas:8443")) === "nas--s8443" &&
+    C.decodeLabel("fake--ts--net--h") === "http://fake.ts.net" &&
+    C.decodeLabel("100--64--0--1--s8443") === "https://100.64.0.1:8443" &&
+    C.decodeLabel("localhost") === null && C.decodeLabel("app") === null);
+
+  await removeAppWorker();
+  check("no service worker on the app's own origin", (await navigator.serviceWorker.getRegistrations()).length === 0);
+
+  const bridge = createBridge({
+    frame: document.getElementById("frame"),
+    request: fakeNode,
+    websocket: fakeSocket,
+    cookies: fakeCookies,
+    onNavigated: (url) => navigated.push(url),
+    onError: (m) => errors.push(m),
+  });
+  const SITE = C.siteOrigin(new URL("http://fake.ts.net"), location);
+
+  // 1. Page with X-Frame-Options/CSP, an absolute-path stylesheet, a relative script, and fetches.
+  let wait = next((d) => d.t === "home", "home page");
+  await bridge.go("http://fake.ts.net/");
+  let { out, origin } = await wait;
+  check("site runs on its own subdomain", origin === SITE && origin !== location.origin, origin);
+  check("site is at the root path of its origin", out.path === "/", out.path);
+  check("page renders in the frame despite X-Frame-Options and CSP", out.framed === true);
+  check("absolute-path stylesheet applied", out.color === "rgb(1, 2, 3)", out.color);
+  check("relative script ran", out.relLoaded === true);
+  check("User-Agent forwarded", (header(lastSeen("/"), "user-agent") ?? "").includes("Mozilla"));
+  check("Referer mapped to tailnet URL", header(lastSeen("/abs.css"), "referer") === "http://fake.ts.net/", header(lastSeen("/abs.css"), "referer"));
+  check("fetch: body and response header", out.api.json.ok === true && out.api.custom === "yes", out.api);
+  check("fetch: custom request header forwarded", header(seen.find((r) => r.url.endsWith("/api") && r.method === "GET"), "x-mine") === "1");
+  check("fetch follows a same-site redirect", out.apiRedirect.status === 200 && out.apiRedirect.json?.ok === true, out.apiRedirect);
+  check("fetch PUT: method and Origin", out.put.method === "PUT" && header(seen.find((r) => r.method === "PUT"), "origin") === "http://fake.ts.net", out.put);
+  check("binary body intact", out.bytes === "0,255,128,7", out.bytes);
+  check("204 passes through", out.nocontent === 204, String(out.nocontent));
+  check("404 passes through", out.missing === 404, String(out.missing));
+  check("fetch redirected to another tailnet site is refused", out.crossSite === 502, String(out.crossSite));
+  check("page script injected without breaking standards mode", out.compatMode === "CSS1Compat", out.compatMode);
+  check("websocket: open, text, binary, blob, close",
+    JSON.stringify(out.ws) === JSON.stringify(["open p2 1", "text hello", "text héllo", "binary 0,255,7", "binary 98,108,111,98", "close 4001 true 3"]), out.ws);
+  check("websocket: dialled the real tailnet URL with Origin and subprotocols",
+    sockets[0]?.url === "ws://fake.ts.net/echo?x=1" && sockets[0].protocols.join() === "p1,p2" &&
+    sockets[0].headers.some(([k, v]) => k === "Origin" && v === "http://fake.ts.net"), sockets[0]?.url);
+  check("websocket: other hosts use the browser's own WebSocket", out.foreignIsNative === true);
+  check("websocket: a socket to another tailnet site is refused", out.forged === "close 1006" && sockets.every((o) => new URL(o.url).host === "fake.ts.net"), out.forged);
+  check("cookies: server-set cookie readable before the page's first script, HttpOnly hidden", out.cookieAtStart === "csrftoken=abc", out.cookieAtStart);
+  check("cookies: script write readable at once", out.cookieAfterSet === "csrftoken=abc; theme=dark", out.cookieAfterSet);
+  check("cookies: script write stored against the tailnet URL", cookieSets[0]?.url === "http://fake.ts.net/" && cookieSets[0].text === "theme=dark; path=/", cookieSets[0]);
+  check("cookies: script-set and HttpOnly cookies both sent to the site", out.sentAfterSet === "sid=secret; csrftoken=abc; theme=dark", out.sentAfterSet);
+  check("cookies: cookie set by a later response reaches the page", out.cookieAfterResponse === "csrftoken=abc; theme=dark; fresh=1", out.cookieAfterResponse);
+  check("cookies: script delete", out.cookieAfterDelete === "csrftoken=abc; fresh=1", out.cookieAfterDelete);
+  check("cookies: script cannot create an HttpOnly cookie", out.cookieAfterHttpOnly === "csrftoken=abc; fresh=1", out.cookieAfterHttpOnly);
+  check("streaming: first chunk arrives while the response is still open", out.stream === "one|two", out.stream);
+  check("streaming: EventSource receives events", out.sse === "a,b", out.sse);
+  for (let i = 0; i < 40 && !eventStreamCancelled; i++) await new Promise((r) => setTimeout(r, 50));
+  check("streaming: closing the page's stream cancels the node's read", eventStreamCancelled === true);
+  check("navigation reported to the app", navigated.at(-1) === "http://fake.ts.net/", navigated);
+
+  // 2. Link to a redirect.
+  wait = next((d) => d.t === "page" && d.title === "Landed", "landed page");
+  await bridge.go("http://fake.ts.net/?do=link");
+  let page = await wait;
+  check("link + redirect lands on the expected address", page.href === SITE + "/landed?from=redirect", page.href);
+  check("only the final URL is reported", navigated.at(-1) === "http://fake.ts.net/landed?from=redirect" && !navigated.includes("http://fake.ts.net/redirect"), navigated);
+
+  // 3. Form POST answered with a 303 to an absolute URL on the same site.
+  wait = next((d) => d.t === "page" && d.title === "Posted", "posted page");
+  await bridge.go("http://fake.ts.net/?do=form");
+  page = await wait;
+  const posted = JSON.parse(page.body || "{}");
+  check("form POST lands on the expected address", page.path.startsWith("/posted?id="), page.href);
+  check("form POST method, body and content type", posted.method === "POST" && posted.body === "q=h%C3%A9llo" && posted.type === "application/x-www-form-urlencoded", posted);
+
+  // 4. Navigation redirected to a different tailnet site moves to that site's subdomain.
+  wait = next((d) => d.t === "page" && d.title === "Other", "other site");
+  await bridge.go("http://fake.ts.net/?do=cross");
+  page = await wait;
+  const OTHER = C.siteOrigin(new URL("http://other.ts.net:8080"), location);
+  check("cross-site redirect moves to the other subdomain", page.origin === OTHER && page.path === "/hello", page.href);
+  check("other site reported to the app", navigated.at(-1) === "http://other.ts.net:8080/hello", navigated);
+  check("each site only requested its own origin", seen.every((r) => ["http://fake.ts.net", "http://other.ts.net:8080"].includes(new URL(r.url).origin)));
+
+  // 5. Unreachable host shows an error page and tells the app.
+  await bridge.go("http://down.ts.net/");
+  for (let i = 0; i < 50 && !errors.some((m) => m.includes("host is down")); i++) await new Promise((r) => setTimeout(r, 100));
+  check("unreachable host reports an error", errors.some((m) => m.includes("host is down")), errors);
+
+  // 6. The app's own files still come from the real server.
+  const r = await fetch("/index.html");
+  check("app's own requests bypass the node", r.ok && (await r.text()).includes("Porthole") && !lastSeen("/index.html"));
+
+  check("address parsing", parseAddress("nas:8080/x").href === "http://nas:8080/x" && parseAddress("https://a.ts.net").href === "https://a.ts.net/");
+}
+
+run().catch((e) => results.push("ERROR  " + (e?.message ?? e) + "  " + (e?.stack ?? ""))).finally(() => {
+  const failed = results.filter((l) => !l.startsWith("PASS")).length;
+  document.getElementById("out").textContent = results.join("\n") + `\n\n${results.length - failed}/${results.length} passed`;
+  document.title = failed ? "FAILED" : "ALL PASSED";
+  if (new URLSearchParams(location.search).has("report")) {
+    const names = results.filter((l) => !l.startsWith("PASS")).map((l) => l.slice(0, 90)).join(" | ");
+    fetch("/test/report?" + new URLSearchParams({ suite: "sites", passed: results.length - failed, total: results.length, failed: names, ua: navigator.userAgent }));
+  }
+});
+</script>
+</body>
