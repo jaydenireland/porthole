@@ -56,7 +56,7 @@
   .lede { color: var(--muted); }
   .card .btn { margin-top: 20px; }
   .fine { color: var(--muted); font-size: 13.5px; margin-top: 16px; }
-  .fine a { word-break: break-all; }
+  .fine a, .fine .mono { word-break: break-all; }
 
   .progress { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; margin-top: 20px; }
   .progress i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width .15s; }
@@ -133,6 +133,7 @@
       <p class="lede">Sign in with Tailscale to add this tab as a temporary device. It can reach what your account can reach, and nothing passes through a server of ours.</p>
       <a class="btn primary large" id="login" target="_blank" rel="noopener" aria-disabled="true">Preparing sign-in…</a>
       <p class="fine" id="loginWaiting" hidden>Finish signing in on the Tailscale page. This tab will continue on its own.</p>
+      <p class="fine" id="loginTarget" hidden>After you sign in, Porthole opens <span class="mono" id="loginTargetAddress"></span>.</p>
     </section>
 
     <section class="view card center" id="viewApproval" hidden>
@@ -156,6 +157,7 @@
       <ul id="peers"></ul>
       <p class="empty" id="empty" hidden>No other devices on this tailnet yet.</p>
       <p class="fine">Choosing a device opens <span class="mono">http://device/</span>. If your service uses a port or HTTPS, type it in the address bar, for example <span class="mono">nas:8080</span> or <span class="mono">https://nas</span>.</p>
+      <p class="fine">The page you are viewing is kept in this tab's address, so you can bookmark it and come back to the same place.</p>
       <p class="fine" id="self"></p>
     </section>
 
@@ -243,10 +245,28 @@ const stateStorage = {
 
 let ipn;
 let running = false;
+let superseded = false;  // another tab took over; ignore further state changes
+
+// The address being viewed is kept after "#" in this page's own address, so a
+// bookmark or a shared link reopens the same tailnet page. Browsers never
+// send that part to a server, so tailnet names stay out of the host's logs.
+const hashTarget = () => {
+  const raw = location.hash.slice(1);
+  try { return decodeURIComponent(raw); } catch { return raw; }
+};
+let pendingTarget = hashTarget();  // opened once the tab is connected
+
+function rememberAddress(url) {
+  history.replaceState(null, "", url ? "#" + url : location.pathname + location.search);
+  let host = "";
+  try { host = new URL(url).host; } catch {}
+  document.title = host ? host + " | Porthole" : "Porthole";
+}
 let loginAsked = false;
 
 function setState(state) {
   debug("state", state);
+  if (superseded) return;
   running = state === "Running";
   $("logout").hidden = !running;
   if (!running) showHome();
@@ -254,6 +274,11 @@ function setState(state) {
     case "Running":
       setStatus("Connected", "ok");
       show("viewDevices");
+      if (pendingTarget) {
+        const target = pendingTarget;
+        pendingTarget = "";
+        queueMicrotask(() => navigate(target));
+      }
       break;
     case "NeedsLogin":
       setStatus("Not connected", "warn");
@@ -376,10 +401,23 @@ const bridge = createBridge({
       index = visited.length - 1;
     }
     if (document.activeElement !== $("address")) $("address").value = url;
+    rememberAddress(url);
     refreshControls();
   },
   onError: (message) => debug("error", message),
+  onSuperseded: () => {
+    superseded = true;
+    stopped("Porthole is open in another tab", "Only one tab can browse at a time, and a newer one took over. This tab is still signed in.");
+    $("restart").textContent = "Use Porthole here";
+    setStatus("In another tab", "warn");
+  },
 });
+
+function showPendingTarget() {
+  $("loginTarget").hidden = !pendingTarget;
+  $("loginTargetAddress").textContent = pendingTarget;
+}
+showPendingTarget();
 
 function showHome() {
   $("frame").hidden = true;
@@ -414,13 +452,28 @@ $("addressForm").addEventListener("submit", (ev) => {
   ev.preventDefault();
   if ($("address").value.trim()) { $("address").blur(); navigate($("address").value); }
 });
-$("homeBtn").addEventListener("click", showHome);
+$("homeBtn").addEventListener("click", () => { rememberAddress(""); showHome(); });
+
+// The address after "#" changed without a reload: a bookmark opened in this
+// tab, or an edit in the browser's own address bar.
+addEventListener("hashchange", () => {
+  const target = hashTarget();
+  if (!running) { pendingTarget = target; showPendingTarget(); return; }
+  if (!target) showHome();
+  else if (target !== visited[index]) navigate(target);
+});
 $("back").addEventListener("click", () => step(-1));
 $("forward").addEventListener("click", () => step(1));
 $("reload").addEventListener("click", () => step(0));
 
 $("login").addEventListener("click", () => { $("loginWaiting").hidden = false; });
-$("logout").addEventListener("click", () => { loginAsked = false; ipn.logout(); });
+$("logout").addEventListener("click", () => {
+  // Signing in again returns to the page that was open.
+  pendingTarget = hashTarget();
+  showPendingTarget();
+  loginAsked = false;
+  ipn.logout();
+});
 
 // --- Startup ----------------------------------------------------------------
 

@@ -199,8 +199,17 @@ ${tellApp({ type: "tailnet-navigate", url })}`);
 // doc: the response is an HTML document, so the app adds its cookies.
 async function nodeRequest(req, nav, doc) {
   const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-  // Some hosts redirect relay.html to its extensionless address.
-  const relay = windows.find((c) => /^\/__tailnet\/relay(\.html)?$/.test(new URL(c.url).pathname));
+  // Every Porthole tab that has this site open has a relay here. Only the
+  // newest tab is active (see bridge.js), and its relay carries the highest
+  // number in "?i=". Some hosts redirect relay.html to its extensionless
+  // address, so both spellings are accepted.
+  let relay = null, newest = -1;
+  for (const client of windows) {
+    const url = new URL(client.url);
+    if (!/^\/__tailnet\/relay(\.html)?$/.test(url.pathname)) continue;
+    const i = Number(url.searchParams.get("i")) || 0;
+    if (i > newest) { newest = i; relay = client; }
+  }
   if (!relay) throw new Error("Open this site from Porthole.");
   return new Promise((resolve, reject) => {
     const channel = new MessageChannel();

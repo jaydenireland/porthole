@@ -35,7 +35,7 @@ of its own origin, isolated from other sites and from the app.
 
 Serve this folder from the root of an origin, for example:
 
-    python3 -m http.server 8791 --bind 127.0.0.1
+    ../serve.py
 
 and open `http://localhost:8791` (the app itself is at `/app/`). The same files must be served on every
 subdomain of that host. Locally this relies on the browser resolving

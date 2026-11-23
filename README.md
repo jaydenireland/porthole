@@ -26,7 +26,10 @@ You need Go, git, Python 3 and Node.
 
 2. Serve the site.
 
-       python3 -m http.server 8791 --bind 127.0.0.1 --directory web
+       ./serve.py
+
+   This is Python's file server with browser caching turned off, so edits
+   show up on reload.
 
 3. Open `http://localhost:8791`. The app is at `/app/`.
 

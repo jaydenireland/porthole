@@ -3,9 +3,10 @@
 <title>Service worker test (mock tailnet)</title>
 <body style="font:14px/1.5 system-ui,sans-serif;color-scheme:light dark;padding:16px">
 <h1 style="font-size:18px">Service worker test</h1>
-<p>Runs the bridge, relay and sw.js against fake in-page "tailnet sites" instead of the real node. No tailnet or login involved.</p>
+<p>Runs the bridge, relay and sw.js against fake in-page "tailnet sites" instead of the real node. No tailnet or login involved. Opening this page takes over from any other Porthole tab in this browser, as opening the app does.</p>
 <pre id="out">running…</pre>
 <iframe id="frame" style="width:100%;height:160px;border:1px solid #888"></iframe>
+<iframe id="frame2" title="Second tab stand-in" style="width:100%;height:60px;border:1px solid #888"></iframe>
 <script src="../__tailnet/codec.js"></script>
 <script type="module">
 import { createBridge, parseAddress, removeAppWorker } from "../app/bridge.js";
@@ -214,6 +215,9 @@ function fakeSocket(options) {
   };
 }
 
+let servedByFirst = 0;     // requests answered by the first bridge
+let supersededCount = 0;   // times the first bridge was told another tab took over
+
 const results = [];
 const check = (name, ok, detail = "") => results.push(`${ok ? "PASS" : "FAIL"}  ${name}${ok ? "" : "  : " + (typeof detail === "string" ? detail : JSON.stringify(detail))}`);
 const header = (req, name) => req?.headers.find(([k]) => k.toLowerCase() === name)?.[1];
@@ -247,11 +251,12 @@ async function run() {
 
   const bridge = createBridge({
     frame: document.getElementById("frame"),
-    request: fakeNode,
+    request: (req) => { servedByFirst++; return fakeNode(req); },
     websocket: fakeSocket,
     cookies: fakeCookies,
     onNavigated: (url) => navigated.push(url),
     onError: (m) => errors.push(m),
+    onSuperseded: () => supersededCount++,
   });
   const SITE = C.siteOrigin(new URL("http://fake.ts.net"), location);
 
@@ -329,6 +334,33 @@ async function run() {
   check("app's own requests bypass the node", r.ok && (await r.text()).includes("Porthole") && !lastSeen("/index.html"));
 
   check("address parsing", parseAddress("nas:8080/x").href === "http://nas:8080/x" && parseAddress("https://a.ts.net").href === "https://a.ts.net/");
+
+  // 7. A second Porthole tab opens. A site's service worker is shared by all
+  // tabs, so the newer tab must take over and get every request. A relay left
+  // behind by an older tab (lower number) must not be chosen either.
+  const stale = document.createElement("iframe");
+  stale.hidden = true;
+  stale.src = SITE + "/__tailnet/relay.html?i=1";
+  document.body.append(stale);
+  let servedBySecond = 0;
+  const bridge2 = createBridge({
+    frame: document.getElementById("frame2"),
+    request: (req) => { servedBySecond++; return fakeNode(req); },
+    websocket: fakeSocket,
+    cookies: fakeCookies,
+    onError: (m) => errors.push("second: " + m),
+  });
+  await new Promise((r) => setTimeout(r, 100));
+  check("second tab: the first is told it was replaced", supersededCount === 1, String(supersededCount));
+  let refused = false;
+  try { await bridge.go("http://fake.ts.net/"); } catch { refused = true; }
+  check("second tab: the first stops browsing and drops its relays", refused && document.querySelectorAll('iframe[title="Tailnet relay"]').length === 0);
+  const firstBefore = servedByFirst;
+  wait = next((d) => d.t === "home", "home page in the second tab");
+  await bridge2.go("http://fake.ts.net/");
+  const loaded = await wait.then(() => true, () => false);
+  check("second tab: its requests reach it, not the first tab or a stale relay", loaded && servedBySecond > 5 && servedByFirst === firstBefore,
+    `page loaded ${loaded}, second ${servedBySecond}, first +${servedByFirst - firstBefore}, errors ${JSON.stringify(errors.slice(-2))}`);
 }
 
 run().catch((e) => results.push("ERROR  " + (e?.message ?? e) + "  " + (e?.stack ?? ""))).finally(() => {

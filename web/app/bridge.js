@@ -28,8 +28,34 @@ export async function removeAppWorker() {
 // cookies:     { get(url) => string, set(url, text) }: what document.cookie reads and writes
 // onNavigated: (tailnetUrl) => void, after a page navigation got a final response
 // onError:     (message) => void
-export function createBridge({ frame, request, websocket, cookies, onNavigated, onError }) {
+// onSuperseded: () => void, when Porthole is opened in another tab and this one stops
+export function createBridge({ frame, request, websocket, cookies, onNavigated, onError, onSuperseded }) {
   const relays = new Map();  // site origin -> { el, upstreamOrigin, pages, ready, resolve, reject }
+
+  // Only one tab browses at a time. A site's service worker is shared by
+  // every tab and cannot tell which tab a request came from, so two active
+  // tabs would get each other's requests. The newest tab takes over: it
+  // announces itself, and older tabs remove their relays and stop.
+  // The number also goes on each relay's address so the worker can pick the
+  // newest tab's relay while an older one is still closing.
+  const instance = Date.now() * 1000 + Math.floor(Math.random() * 1000);
+  let active = true;
+  const tabs = "BroadcastChannel" in globalThis ? new BroadcastChannel("porthole-active-tab") : null;
+  if (tabs) {
+    tabs.onmessage = (ev) => {
+      if (!active || ev.data?.type !== "claim" || !(ev.data.instance > instance)) return;
+      active = false;
+      for (const relay of relays.values()) {
+        relay.reject(new Error("Porthole is open in another tab."));
+        relay.el.remove();
+      }
+      relays.clear();
+      frame.src = "about:blank";
+      tabs.close();
+      onSuperseded?.();
+    };
+    tabs.postMessage({ type: "claim", instance });
+  }
 
   function relayFor(upstream) {
     const site = Codec.siteOrigin(upstream, location);
@@ -44,9 +70,9 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
         relay.reject = reject;
         setTimeout(() => reject(new Error(`This browser could not reach ${new URL(site).host}, the address Porthole uses to show that site.`)), 15000);
       });
-      relay.ready.catch(() => { el.remove(); relays.delete(site); });
+      relay.ready.catch(() => { el.remove(); if (relays.get(site) === relay) relays.delete(site); });
       relays.set(site, relay);
-      el.src = site + "/__tailnet/relay.html";
+      el.src = site + "/__tailnet/relay.html?i=" + instance;
       document.body.append(el);
     }
     return relay.ready.then(() => site);
@@ -54,8 +80,10 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
 
   // Show a tailnet URL in the frame.
   async function go(input) {
+    if (!active) throw new Error("Porthole is open in another tab.");
     const upstream = typeof input === "string" ? parseAddress(input) : input;
     const site = await relayFor(upstream);
+    if (!active) throw new Error("Porthole is open in another tab.");
     frame.src = site + upstream.pathname + upstream.search + upstream.hash;
   }
 
