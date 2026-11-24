@@ -118,7 +118,15 @@ pub(crate) struct Inner {
 /// for dead. It sends something at least once a minute.
 const QUIET_LIMIT_MS: u32 = 150_000;
 
-type Updates = std::pin::Pin<Box<dyn futures_util::Stream<Item = ts_control::StateUpdate>>>;
+/// How long one question about sign-in may go unanswered before it is asked
+/// again on a new connection.
+const SIGN_IN_ASK_MS: u32 = 30_000;
+
+/// How many times in a row the control server may be unreachable while
+/// waiting for sign-in before the wait is given up.
+const SIGN_IN_FAILURE_LIMIT: u32 = 10;
+
+type Updates =std::pin::Pin<Box<dyn futures_util::Stream<Item = ts_control::StateUpdate>>>;
 
 impl Inner {
     /// Connect to the control server again after the connection was lost,
@@ -194,6 +202,29 @@ impl Inner {
             let _ = waiter.send(());
         }
         Ok(())
+    }
+
+    /// Ask the control server whether sign-in has finished. The request
+    /// stays open until it has, so no answer after a while says nothing
+    /// either way: `None` then, and the next call uses a new connection, in
+    /// case the old one died without the browser saying so. An error also
+    /// discards the connection.
+    async fn ask_about_sign_in(&self) -> Result<Option<Registration>, Error> {
+        use futures_util::future::{Either, select};
+        let asked = async {
+            let connection = self.connection().await?;
+            let waiting_on = self.sign_in.borrow().clone();
+            connection.register(&self.config, &self.keys, waiting_on).await
+        };
+        let limit = crate::timer::sleep_ms(SIGN_IN_ASK_MS);
+        let answer = match select(std::pin::pin!(asked), limit).await {
+            Either::Left((answer, _)) => answer.map(Some),
+            Either::Right(_) => Ok(None),
+        };
+        if !matches!(answer, Ok(Some(_))) {
+            self.connection.borrow_mut().take();
+        }
+        answer
     }
 
     async fn connection(&self) -> Result<Rc<Connection>, Error> {
@@ -296,11 +327,31 @@ impl Client {
     #[wasm_bindgen(js_name = waitForSignIn)]
     pub async fn wait_for_sign_in(&self, on_approval_needed: Option<js_sys::Function>) -> Result<(), Error> {
         let inner = self.inner.clone();
-        let connection = inner.connection().await?;
         let mut told = false;
+        let mut failures = 0;
         loop {
-            let waiting_on = inner.sign_in.borrow().clone();
-            match connection.register(&inner.config, &inner.keys, waiting_on).await? {
+            // The user is signing in in another tab, so this one is in the
+            // background, where a browser may close its connections or stop
+            // it altogether for a while. Losing the connection here is
+            // ordinary: connect again and ask again.
+            let registration = match inner.ask_about_sign_in().await {
+                Ok(Some(registration)) => {
+                    failures = 0;
+                    registration
+                }
+                Ok(None) => continue,
+                Err(error) => {
+                    failures += 1;
+                    if failures > SIGN_IN_FAILURE_LIMIT {
+                        return Err(error);
+                    }
+                    let wait_ms = (500 << failures.min(5)).min(10_000);
+                    tracing::warn!(%error, wait_ms, "lost the control server while waiting for sign-in; asking again");
+                    crate::timer::sleep_ms(wait_ms).await;
+                    continue;
+                }
+            };
+            match registration {
                 Registration::Authorized => {
                     inner.sign_in.borrow_mut().take();
                     inner.signed_in.set(true);
@@ -366,8 +417,19 @@ impl Client {
         if !inner.signed_in.get() {
             return Err(Error::NotSignedIn);
         }
-        let mut connection = inner.connection().await?;
-        let mut updates: Updates = Box::pin(connection.updates(&inner.config, &inner.keys).await?);
+        let first = async {
+            let connection = inner.connection().await?;
+            let updates: Updates = Box::pin(connection.updates(&inner.config, &inner.keys).await?);
+            Ok::<_, Error>((connection, updates))
+        };
+        let (mut connection, mut updates) = match first.await {
+            Ok(started) => started,
+            // The connection may have died since sign-in; try once on a new one.
+            Err(error) => {
+                tracing::warn!(%error, "could not ask for the device list; connecting again");
+                inner.reconnect().await?.ok_or(Error::NotSignedIn)?
+            }
+        };
         wasm_bindgen_futures::spawn_local(async move {
             use futures_util::future::{Either, select};
             loop {
