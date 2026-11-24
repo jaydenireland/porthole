@@ -9,18 +9,16 @@ it: the browser tab talks to Tailscale directly.
 | File | What it does |
 |---|---|
 | `wrangler.jsonc` | Worker name, static files folder, and the two routes. |
-| `src/worker.js` | Serves the Tailscale client from its compressed copy, and logs test reports. |
-| `build.mjs` | Builds `dist/` from `../web` and compresses the client. |
+| `src/worker.js` | Logs test reports. |
+| `build.mjs` | Builds `dist/` from `../web`. |
 | `deploy.sh` | Runs the build, then publishes. |
 
 ## Why there is a Worker at all
 
-The Tailscale client (`web/node/main.wasm`) is about 29 MB, and Cloudflare
-limits a single static file to 25 MiB. `build.mjs` stores it compressed with
-Brotli (about 5 MB) as `node/main.wasm.br`. The Worker answers
-`/node/main.wasm` with that file and `Content-Encoding: br`, so browsers
-download 5 MB and unpack it themselves. Every other file is served by
-Cloudflare without running the Worker.
+Only for `/test/report`, where the test pages send their results so they
+show up in the Worker's log. Every file, the Tailscale client included, is
+served by Cloudflare without running the Worker. Build the client first
+with `../client/build.sh`; `build.mjs` stops if it is missing.
 
 ## One-time setup
 
@@ -63,8 +61,9 @@ This serves the built site with the Worker at `http://localhost:8787`.
 
 ## After publishing
 
-- `https://porthole.app/test/client.html` starts the Tailscale client in the
-  current browser and shows whether it could reach Tailscale.
+- `https://porthole.app/test/client.html` runs the Tailscale client in the
+  current browser and shows whether it could reach Tailscale and pass
+  traffic between two throwaway devices.
 - `https://porthole.app/test/mock.html` runs the page-loading checks against
   stand-in sites. It needs the wildcard DNS record.
 - Add `?report` to either address on a device you cannot read easily, such as

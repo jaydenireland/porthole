@@ -2,4 +2,10 @@
 target = "wasm32-unknown-unknown"
 
 [target.wasm32-unknown-unknown]
-rustflags = ["--cfg", 'getrandom_backend="wasm_js"']
+# Random numbers come from the page. Reference types and multi-value are
+# left out because they would raise the oldest browser the client runs in
+# (to Chrome 96 and Safari 15) for no gain; build.sh checks the result.
+rustflags = [
+  "--cfg", 'getrandom_backend="wasm_js"',
+  "-C", "target-feature=-reference-types,-multivalue",
+]

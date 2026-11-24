@@ -1,6 +1,7 @@
 #!/bin/sh
-# Builds the Rust Tailscale client for the browser into ../web/client/:
-# porthole_client_bg.wasm and porthole_client.js.
+# Builds the Tailscale client for the browser: porthole_client_bg.wasm and
+# porthole_client.js, into ../web/client/ for the app and, with the checks
+# and logging added, into ../web/test/client/ for the test pages.
 #
 #   ./build.sh                 use ../tailscale-rs-src, fetching it if missing
 #   ./build.sh /path/to/src    use an existing patched tailscale-rs checkout
@@ -12,6 +13,8 @@
 #   (rustup target add wasm32-unknown-unknown);
 # - wasm-bindgen's command-line tool at the version in Cargo.lock; the script
 #   says how to install it;
+# - Binaryen's wasm-opt, which makes the result smaller and checks which
+#   WebAssembly features it uses (brew install binaryen);
 # - a clang that can compile for WebAssembly, for the C parts of the TLS
 #   crypto library (ring). Apple's cannot; Homebrew's can (brew install llvm).
 #   Set CC_wasm32_unknown_unknown and AR_wasm32_unknown_unknown to use another.
@@ -74,15 +77,37 @@ if [ "${RUN_TESTS:-}" != "" ]; then
   cargo test --target "$(rustc -vV | sed -n 's/^host: //p')"
 fi
 
-cargo build --release --locked
-OUT="$HERE/../web/client"
-rm -rf "$OUT"
-wasm-bindgen --target web --no-typescript --out-dir "$OUT" --out-name porthole_client \
-  target/wasm32-unknown-unknown/release/porthole_client.wasm
-
-# Optional: Binaryen's wasm-opt makes the file smaller still.
-if command -v wasm-opt >/dev/null 2>&1; then
-  wasm-opt -Oz --strip-debug -o "$OUT/porthole_client_bg.wasm" "$OUT/porthole_client_bg.wasm"
+# The WebAssembly features the client may use, the same three the browsers
+# on the compatibility page are judged by. wasm-opt refuses anything else,
+# so a change that would raise the oldest supported browser fails here.
+WASM_FEATURES="--mvp-features --enable-bulk-memory --enable-sign-ext --enable-nontrapping-float-to-int --enable-mutable-globals"
+if ! command -v wasm-opt >/dev/null 2>&1; then
+  echo "Binaryen's wasm-opt is needed. Install it with:" >&2
+  echo "  brew install binaryen" >&2
+  exit 1
 fi
 
-ls -l "$OUT"
+# Two builds. The app's has no checks and no logging, to keep the download
+# small. The test pages' has both; the app loads it too when opened with
+# ?debug.
+bundle() {  # bundle <out dir> [cargo arguments]
+  OUT="$1"; shift
+  RAW=target/wasm32-unknown-unknown/release/porthole_client.wasm
+  cargo build --release --locked "$@"
+  # Rust's standard library is built with reference types and multi-value
+  # switched on and says so in the file, although no code here uses them.
+  # wasm-bindgen would start using them on seeing that note, so remove it.
+  wasm-opt $WASM_FEATURES --enable-reference-types --enable-multivalue \
+    --strip-target-features -o target/porthole_client.wasm "$RAW"
+  rm -rf "$OUT"
+  # (wasm-bindgen warns that the note is missing; that is intended.)
+  wasm-bindgen --target web --no-typescript --out-dir "$OUT" --out-name porthole_client \
+    target/porthole_client.wasm
+  wasm-opt -Oz --strip-debug --strip-producers $WASM_FEATURES \
+    -o "$OUT/porthole_client_bg.wasm" "$OUT/porthole_client_bg.wasm"
+}
+
+bundle "$HERE/../web/client"
+bundle "$HERE/../web/test/client" --features console-log,diagnostics
+
+ls -l "$HERE/../web/client" "$HERE/../web/test/client"

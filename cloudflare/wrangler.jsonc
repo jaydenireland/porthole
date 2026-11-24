@@ -7,7 +7,7 @@
 
   // dist/ is produced by build.mjs from ../web.
   // Static files are served directly; the Worker only runs for paths that
-  // are not files (the Tailscale client and the test report address).
+  // are not files (the test report address).
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",

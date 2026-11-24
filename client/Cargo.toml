@@ -95,9 +95,12 @@ rcgen = "0.14"
 tokio = { version = "1", features = ["io-util", "macros", "rt", "time"] }
 
 [features]
-default = ["console-log", "diagnostics"]
-# The checks the test page runs: relayCheck, pathCheck, siteCheck.
+# The public build has neither. build.sh makes a second build with both for
+# the test pages, in ../web/test/client/.
+default = []
+# The checks the test pages run: relayCheck, pathCheck, siteCheck and so on.
 diagnostics = ["dep:rcgen"]
+# Sends what the libraries report to the browser console.
 console-log = ["dep:tracing-subscriber", "dep:tracing-web"]
 
 [profile.release]

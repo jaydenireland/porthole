@@ -245,7 +245,7 @@
 
     <details id="details" hidden>
       <summary>Details</summary>
-      <p class="fine">What the Rust client has reported. It may include the names of your devices.</p>
+      <p class="fine">What the Tailscale client in this tab has reported. It may include the names of your devices.</p>
       <button class="btn" id="detailsCopy" type="button">Copy</button>
       <pre id="detailsLog"></pre>
     </details>
@@ -267,10 +267,10 @@
   </div>
 </main>
 
-<script src="/node/wasm_exec.js"></script>
 <script src="/__tailnet/codec.js"></script>
 <script type="module">
 import { createBridge, parseAddress, removeAppWorker } from "./bridge.js";
+import { createIPN, STATE_ID } from "./client.js";
 
 const $ = (id) => document.getElementById(id);
 const debug = (...args) => console.debug("[porthole]", ...args);
@@ -298,12 +298,22 @@ $("noticeClose").addEventListener("click", () => { $("notice").hidden = true; })
 
 function stopped(title, text) {
   running = false;
+  if (detailsSource) $("details").hidden = false;
   $("stoppedTitle").textContent = title;
   $("stoppedText").textContent = text;
   setStatus("Stopped", "bad");
   $("logout").hidden = true;
   showHome();
   show("viewStopped");
+}
+let detailsSource = null;  // set once the client has loaded
+{
+  const refresh = () => { if (detailsSource && $("details").open) $("detailsLog").textContent = detailsSource(); };
+  $("details").addEventListener("toggle", refresh);
+  setInterval(refresh, 1000);
+  $("detailsCopy").addEventListener("click", () => {
+    if (detailsSource) navigator.clipboard.writeText(detailsSource()).then(() => { $("detailsCopy").textContent = "Copied"; });
+  });
 }
 $("restart").addEventListener("click", () => {
   const url = new URL(location.href);
@@ -313,35 +323,8 @@ $("restart").addEventListener("click", () => {
 
 // --- The Tailscale client ---------------------------------------------------
 
-// Our build of Tailscale's browser client (see README.md), loaded with the Go
-// toolchain's wasm_exec.js. The Go program defines globalThis.newIPN.
-async function createIPN(config) {
-  const go = new Go();
-  const response = await fetch(config.wasmURL);
-  if (!response.ok) throw new Error(`Download failed (${response.status}).`);
-  const { instance } = await WebAssembly.instantiateStreaming(withProgress(response, config.onProgress), go.importObject);
-  go.run(instance).then(() => config.panicHandler("The Tailscale client exited."));
-  return newIPN(config);
-}
-
-// Re-wraps a response so we can report how much of it has arrived.
-function withProgress(response, onProgress) {
-  const total = Number(response.headers.get("content-length")) || 0;
-  if (!response.body || !total || response.headers.get("content-encoding")) return response;
-  let loaded = 0;
-  const reader = response.body.getReader();
-  const body = new ReadableStream({
-    async pull(controller) {
-      const { done, value } = await reader.read();
-      if (done) { controller.close(); return; }
-      loaded += value.length;
-      onProgress(loaded / total);
-      controller.enqueue(value);
-    },
-    cancel: (reason) => reader.cancel(reason),
-  });
-  return new Response(body, { headers: { "Content-Type": "application/wasm" } });
-}
+// The client itself is in /client (see its README.md); client.js loads it
+// and reports its progress as a state the app follows.
 
 // Where the device's keys are kept.
 //
@@ -360,6 +343,15 @@ const stateStorage = {
   setState(id, value) { try { keyStore().setItem(KEY_PREFIX + id, value); } catch {} },
   getState(id) { try { return keyStore().getItem(KEY_PREFIX + id) ?? ""; } catch { return ""; } },
 };
+// Keys left by the earlier client, which stored them under other names.
+// Nothing can use them now.
+for (const storage of [sessionStorage, localStorage]) {
+  try {
+    for (const key of Object.keys(storage)) {
+      if (key.startsWith(KEY_PREFIX) && key !== KEY_PREFIX + STATE_ID) storage.removeItem(key);
+    }
+  } catch {}
+}
 function deleteKeys() {
   for (const storage of [sessionStorage, localStorage]) {
     try {
@@ -377,7 +369,9 @@ let disconnecting = false;  // signing out, or wiping stored keys before a reloa
 // start the client. Tabs can share one identity, and two running clients
 // with the same identity would knock each other offline.
 const parked = new URLSearchParams(location.search).has("parked");
-const useRustClient = new URLSearchParams(location.search).get("client") === "rust";
+// ?debug loads the build of the client that logs what it does, and shows
+// that log under "Details".
+const debugBuild = new URLSearchParams(location.search).has("debug");
 
 // The logins to tailnet sites themselves (their cookies) are held by the
 // client in memory, so they are saved alongside the keys:
@@ -740,18 +734,11 @@ async function start() {
   }
   removeAppWorker();
   try {
-    // ?client=rust tries the Rust build of the client (see /client/README.md).
-    const create = useRustClient ? (await import("./rust-client.js")).createIPN : createIPN;
-    debug("client", useRustClient ? "rust" : "go");
-    ipn = await create({
-      wasmURL: "/node/main.wasm",
+    ipn = await createIPN({
       hostname: "porthole",
       stateStorage,
       ephemeral: !stay,
-      onProgress: (fraction) => {
-        $("progress").className = "progress";
-        $("progress").firstElementChild.style.width = Math.round(fraction * 100) + "%";
-      },
+      debug: debugBuild,
       panicHandler: (err) => { debug("client stopped", err); stopped("Porthole stopped", "The Tailscale client in this tab stopped unexpectedly. Reload to start again."); },
     });
   } catch (e) {
@@ -760,17 +747,10 @@ async function start() {
     return;
   }
   restoreCookies();
-  // The Rust client keeps a log; show it under a "Details" fold, since on a
-  // phone there is no console to look at.
-  if (ipn.diagnostics) {
-    $("details").hidden = false;
-    const refresh = () => { if ($("details").open) $("detailsLog").textContent = ipn.diagnostics(); };
-    $("details").addEventListener("toggle", refresh);
-    setInterval(refresh, 1000);
-    $("detailsCopy").addEventListener("click", () => {
-      navigator.clipboard.writeText(ipn.diagnostics()).then(() => { $("detailsCopy").textContent = "Copied"; });
-    });
-  }
+  // The client keeps a log. It is offered under a "Details" fold when the
+  // app stops and with ?debug, since on a phone there is no console to read.
+  detailsSource = ipn.diagnostics;
+  if (debugBuild) $("details").hidden = false;
   ipn.run({
     notifyState: setState,
     notifyNetMap: renderNetMap,

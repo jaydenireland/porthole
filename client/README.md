@@ -1,79 +1,45 @@
-# Rust client (work in progress)
+# The Tailscale client
 
-A replacement for the Go Tailscale client in `web/node/`, built on Tailscale's
-own Rust crates, [tailscale-rs](https://github.com/tailscale/tailscale-rs).
-The app uses the Go client unless it is opened with `?client=rust`, for
-example `http://localhost:8791/app/?client=rust`.
+Porthole's Tailscale client for browser tabs, built on Tailscale's own Rust
+crates, [tailscale-rs](https://github.com/tailscale/tailscale-rs), and
+compiled to WebAssembly. The app loads it through `../web/app/client.js`.
 
-The reasons for it are size and reach. The Go client is a 30 MB download that
-needs 18 MB of memory before it does anything, and Go's compiler sets the
-oldest browser it can run in. Measured on the same Mac in Chrome (the test page also passes in Safari):
+It replaced a build of Tailscale's Go browser client (in the git history up
+to November 2026). The reasons were size and reach: the Go client was a
+4.8 MB compressed download that needed 18 MB of memory before it did
+anything, and Go's compiler decides which WebAssembly features it uses.
 
-| | Go client | This client, so far |
+| | Go client | This client |
 |---|---|---|
-| Download, compressed | 4.8 MB | about 1.1 MB |
-| Memory after start | 18 MB | about 2.5 MB |
+| Download, compressed | 4.8 MB | 1.0 MB |
 | Time to a sign-in address | about 1.2 s | 0.1 to 0.3 s |
 
-The Rust build now has every layer the Go one has, so the size should not
-grow much more. It has not been through a size optimizer yet.
+## What it does
 
-## What works
+- Creates the device's keys, and saves and restores them as text.
+- Connects to Tailscale's control server from a browser tab, registers the
+  device, and gives the address where the user signs in.
+- Follows the device list and the relay list, chooses the nearest relay and
+  tells the control server, so other devices can answer.
+- Passes packets through a Tailscale relay (DERP) over a WebSocket, with
+  WireGuard and TCP on top.
+- What pages use: HTTP and HTTPS requests with the certificate checked,
+  cookies, and WebSockets.
+- Reconnects on its own when the control server or a relay connection ends.
+- Signs out.
 
-- Creating the device's keys, and saving and restoring them as text.
-- Connecting to Tailscale's control server from a browser tab.
-- Registering the device and getting the address where the user signs in.
-- Waiting for that sign-in to finish.
-- Passing packets between devices through a Tailscale relay (DERP) over a
-  WebSocket.
-- WireGuard through the relay, and TCP connections on top of it. The test
-  page proves this with two throwaway devices in the same tab: they meet at
-  a relay, set up WireGuard, and one opens a TCP connection to the other,
-  in about 1.2 s.
-- What pages use, checked the same way between the two devices: an HTTP
-  request, an HTTPS request with the certificate checked, a cookie kept and
-  sent back, and a WebSocket.
-- The calls the app's bridge makes on the Go client, with the same shapes:
-  `request`, `websocket`, `cookies`, `setCookie`, `exportCookies`,
-  `importCookies`. The test page calls them from JavaScript, and then uses
-  the app's real bridge and service worker to show a page from the second
-  device in a frame.
-- The app itself, up to the sign-in screen, through `web/app/rust-client.js`,
-  which gives the Rust client the Go client's interface.
-
-Written but not yet run against a real tailnet, because it needs a person to
-sign in:
-
-- Following the device list and the relay list.
-- Choosing the nearest relay and telling the control server, so other
-  devices can answer.
-- Opening a TCP connection to a real device by name.
-- Everything the app does after sign-in, including waiting for an admin's
-  approval and signing out.
-
-Open `/test/client-rs-signin.html` to try the first three, and the app with
-`?client=rust` for the rest.
-
-Safari passed every check up to the JavaScript calls, and then became
-unreliable: the checks were run in hidden tabs, which Safari slows down, and
-many were left open at once. The frame check has only passed in Chrome. A
-run in one visible Safari tab would settle it.
+All of it has been used on a real tailnet from an iPhone, and the test page
+below passes in Chrome on a Mac.
 
 ## What is left
 
-In the order it needs doing:
-
-1. Checking on a real tailnet: WebSockets and logins on real sites, "Stay
-   signed in", signing out, a second tab, and reconnecting after the phone
-   sleeps or changes network.
-2. Desktop Safari, in one visible tab.
-3. Building for the oldest browsers we can reach, which is the reason for
-   this client and has not been started: Rust's default WebAssembly
-   features and untranspiled page scripts put the floor about where the Go
-   client's is.
-4. A build for the public site without the checks and logging, through a
-   size optimizer.
-5. Removing the Go client.
+1. Building for older browsers. The client needs three WebAssembly features
+   beyond the first version (bulk memory, sign extension, saturating
+   conversions), and the page scripts are not transpiled. Together they put
+   the floor at Chrome 84, Firefox 90 and Safari 16.
+2. Desktop Safari in one visible tab, Firefox, and Android. Safari on a Mac
+   passed every check up to the JavaScript calls and then became unreliable
+   in hidden tabs, which Safari slows down.
 
 Known gaps in recovery: a relay connection that dies without the browser
 noticing is not detected (the library hides the relay's keep-alives), and
@@ -93,12 +59,12 @@ choosing another.
 ## Build and test
 
 ```sh
-./build.sh                 # writes ../web/client/
+./build.sh                 # writes ../web/client/ and ../web/test/client/
 RUN_TESTS=1 ./build.sh     # runs the tests first
 ```
 
 Then start the site (`../serve.py`) and open
-`http://localhost:8791/test/client-rs.html`. It connects to Tailscale's real
+`http://localhost:8791/test/client.html`. It connects to Tailscale's real
 control server and asks for a sign-in address. Then, with two throwaway
 devices, it passes a packet through a Tailscale relay, opens a TCP
 connection over WireGuard through it, and makes HTTP, HTTPS and WebSocket
@@ -108,11 +74,20 @@ requests over that. None of this signs in.
 parts that need no browser: HTTP, TLS, cookies and WebSockets against a
 small server inside the test, and the challenge handling.
 
+There are two builds. The app's, in `../web/client/`, has no checks and no
+logging. The test pages', in `../web/test/client/`, has both (the
+`diagnostics` and `console-log` features), and the app loads it instead
+when opened with `?debug`, which also shows what the client logs under
+"Details".
+
 The build needs a clang that can compile for WebAssembly, for the C parts of
 the TLS crypto library. Apple's cannot; `brew install llvm` provides one and
-`build.sh` finds it.
+`build.sh` finds it. It also needs Binaryen's `wasm-opt`
+(`brew install binaryen`), which shrinks the result and refuses any
+WebAssembly feature beyond the three named above, so a change that would
+raise the oldest supported browser fails the build.
 
-`/test/client-rs-signin.html` goes further and needs you: it shows the
+`/test/client-signin.html` goes further and needs you: it shows the
 sign-in link, lists your devices and the relays, and lets you open a
 connection to one of your devices.
 
@@ -132,7 +107,7 @@ and applies `tailscale-rs.patch`. After changing files there, run
 | `src/cookies.rs` | the cookie jar, with a browser's rules for scripts. |
 | `src/selftest.rs` | the checks the test page runs: `relayCheck()`, `pathCheck()`, `recoveryCheck()`, `siteCheck()`, `netmapCheck()`, `pairedClient()`. |
 | `src/timer.rs` | waiting, done in a worker so hidden tabs do not stall. |
-| `../web/app/rust-client.js` | gives this client the Go client's interface, for the app. |
+| `../web/app/client.js` | loads the client for the app and reports its progress as a state. |
 | `src/control.rs` | the control server connection over a WebSocket. |
 | `src/engine.rs` | joins the TCP/IP stack, WireGuard and the relays, and runs them on the page's event loop. |
 | `src/netmap.rs` | the tab's picture of the tailnet, kept up to date from the control server's updates. |

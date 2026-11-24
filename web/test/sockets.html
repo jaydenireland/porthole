@@ -55,7 +55,7 @@ try {
   // The two clients themselves, as far as a sign-in address.
   const withTimeout = (promise, seconds) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out after ${seconds} s`)), seconds * 1000))]);
   try {
-    const { default: init, Client } = await import("/client/porthole_client.js");
+    const { default: init, Client } = await import("/test/client/porthole_client.js");
     await init();
     const attempts = [];
     for (let i = 0; i < 3; i++) {
@@ -63,10 +63,10 @@ try {
       attempts.push(await withTimeout(new Client("porthole-test", true).signInAddress(), 20).then(
         (address) => ({ ok: /^https:\/\/login\.tailscale\.com\//.test(address ?? ""), ms: Math.round(performance.now() - t) }),
         (e) => ({ error: String(e.message || e).slice(0, 200), ms: Math.round(performance.now() - t) })));
-      out.rustClient = attempts;
+      out.client = attempts;
       show();
     }
-  } catch (e) { out.rustClient = { loadFailed: String(e.message || e) }; }
+  } catch (e) { out.client = { loadFailed: String(e.message || e) }; }
   show();
 } catch (e) {
   out.failed = String(e && e.message || e);

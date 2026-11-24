@@ -1,10 +1,10 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Rust client sign-in test</title>
+<title>Client sign-in test</title>
 <body style="font:15px/1.5 system-ui,sans-serif;color-scheme:light dark;padding:16px;max-width:720px">
-<h1 style="font-size:18px">Rust client sign-in test</h1>
-<p>Signs this tab in to your tailnet with the Rust build of the client, lists your devices, and lets you open a connection to one. The tab joins as a temporary device named <code>porthole-rs-test</code>, which Tailscale removes after it goes offline. Its keys stay in this tab until you close it.</p>
+<h1 style="font-size:18px">Client sign-in test</h1>
+<p>Signs this tab in to your tailnet with the client, lists your devices, and lets you open a connection to one. The tab joins as a temporary device named <code>porthole-rs-test</code>, which Tailscale removes after it goes offline. Its keys stay in this tab until you close it.</p>
 <p id="status">Starting…</p>
 <p><a id="signin" target="_blank" rel="noopener" hidden>Sign in with Tailscale</a></p>
 <h2 style="font-size:16px" id="devicesTitle" hidden>Devices</h2>
@@ -24,7 +24,7 @@ const $ = (id) => document.getElementById(id);
 const status = (text) => { $("status").textContent = text; };
 const KEY = "porthole-rs-test-state";
 try {
-  const { default: init, Client } = await import("/client/porthole_client.js");
+  const { default: init, Client } = await import("/test/client/porthole_client.js");
   await init();
   const client = new Client("porthole-rs-test", true, sessionStorage.getItem(KEY) ?? undefined);
   sessionStorage.setItem(KEY, client.state());

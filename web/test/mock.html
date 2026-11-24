@@ -171,7 +171,7 @@ async function fakeSites(req) {
 }
 
 // Stands in for the node's cookie jar: one flat jar per origin, with HttpOnly
-// cookies kept apart (the real rules are tested in Go, in cookies_js_test.go).
+// cookies kept apart (the real rules are tested in /client/src/cookies.rs).
 const jars = new Map();  // origin -> { script: Map, httpOnly: Map }
 const cookieSets = [];   // every cookies.set call
 const jarFor = (url) => {

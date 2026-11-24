@@ -1,16 +1,10 @@
-# Tailscale source that web/build.sh fetches and patches. Our changes to it
-# are kept in web/tsconnect.patch.
-/tailscale-src/
-
-# The built Tailscale client. Run web/build.sh to produce it.
-/web/node/
-
-# The Rust client (work in progress, see client/README.md): the tailscale-rs
-# source that client/build.sh fetches and patches (our changes are kept in
-# client/tailscale-rs.patch), Cargo's build folder, and the built client.
+# The Tailscale client (see client/README.md): the tailscale-rs source that
+# client/build.sh fetches and patches (our changes are kept in
+# client/tailscale-rs.patch), Cargo's build folder, and the two builds.
 /tailscale-rs-src/
 /client/target/
 /web/client/
+/web/test/client/
 
 # Cloudflare build output and tooling
 node_modules/
@@ -19,3 +13,6 @@ node_modules/
 .wrangler/
 
 .DS_Store
+
+# A leftover checkout from the Go client this replaced; safe to delete.
+/tailscale-src/

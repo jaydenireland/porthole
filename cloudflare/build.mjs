@@ -1,22 +1,17 @@
 // Builds dist/ from ../web for Cloudflare.
 //
-// Copies the site, leaves out files that are only for development, and stores
-// the Tailscale client Brotli-compressed, because Cloudflare limits a single
-// file to 25 MiB and the client is larger than that uncompressed.
-import { createHash } from "node:crypto";
+// Copies the site and leaves out files that are only for development.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import zlib from "node:zlib";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const web = path.join(here, "..", "web");
 const dist = path.join(here, "dist");
-const cacheDir = path.join(here, ".cache");
 const LIMIT = 25 * 1024 * 1024;
 
 // Paths under web/ that are not part of the published site.
-const SKIP = new Set(["README.md", "build.sh", "make-patch.sh", "tsconnect.patch", "node/main.wasm"]);
+const SKIP = new Set(["README.md"]);
 
 function copy(dir) {
   for (const entry of fs.readdirSync(path.join(web, dir), { withFileTypes: true })) {
@@ -42,26 +37,13 @@ fs.writeFileSync(path.join(dist, "404.html"), `<!doctype html>
 <a class="btn primary" href="/">Go to Porthole</a></main></body></html>
 `);
 
-// The Tailscale client, compressed. Compressing takes a while, so the result
-// is cached by the hash of the input.
-const wasm = fs.readFileSync(path.join(web, "node", "main.wasm"));
-const hash = createHash("sha256").update(wasm).digest("hex").slice(0, 16);
-const cached = path.join(cacheDir, `main-${hash}.wasm.br`);
-if (!fs.existsSync(cached)) {
-  console.log(`Compressing the Tailscale client (${(wasm.length / 1048576).toFixed(1)} MB)…`);
-  const started = Date.now();
-  const br = zlib.brotliCompressSync(wasm, {
-    params: {
-      [zlib.constants.BROTLI_PARAM_QUALITY]: 11,
-      [zlib.constants.BROTLI_PARAM_LGWIN]: 24,
-      [zlib.constants.BROTLI_PARAM_SIZE_HINT]: wasm.length,
-    },
-  });
-  fs.mkdirSync(cacheDir, { recursive: true });
-  fs.writeFileSync(cached, br);
-  console.log(`  done in ${Math.round((Date.now() - started) / 1000)} s`);
+// The client is built separately (../client/build.sh) and is not in git.
+for (const file of ["client/porthole_client.js", "client/porthole_client_bg.wasm"]) {
+  if (!fs.existsSync(path.join(dist, file))) {
+    console.error(`web/${file} is missing. Run client/build.sh first.`);
+    process.exit(1);
+  }
 }
-fs.copyFileSync(cached, path.join(dist, "node", "main.wasm.br"));
 
 // Report, and stop if anything is still too large for Cloudflare.
 let files = 0, total = 0, tooLarge = [];
@@ -74,8 +56,8 @@ let files = 0, total = 0, tooLarge = [];
     if (size > LIMIT) tooLarge.push(`${path.relative(dist, full)} (${(size / 1048576).toFixed(1)} MB)`);
   }
 })(dist);
-const brSize = fs.statSync(cached).size;
-console.log(`dist/: ${files} files, ${(total / 1048576).toFixed(1)} MB. Tailscale client: ${(wasm.length / 1048576).toFixed(1)} MB, ${(brSize / 1048576).toFixed(1)} MB compressed.`);
+const client = fs.statSync(path.join(dist, "client", "porthole_client_bg.wasm")).size;
+console.log(`dist/: ${files} files, ${(total / 1048576).toFixed(1)} MB. Tailscale client: ${(client / 1048576).toFixed(1)} MB before Cloudflare compresses it.`);
 if (tooLarge.length) {
   console.error("Over Cloudflare's 25 MiB limit per file:\n  " + tooLarge.join("\n  "));
   process.exit(1);

@@ -1,41 +1,184 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Client start test</title>
+<title>Client test</title>
 <body style="font:14px/1.5 system-ui,sans-serif;color-scheme:light dark;padding:16px">
-<h1 style="font-size:18px">Client start test</h1>
-<p>Loads the Tailscale client in this browser, starts it, and asks Tailscale for a sign-in address. It does not sign in. Add <code>?report</code> to send the result to the server log.</p>
+<h1 style="font-size:18px">Client test</h1>
+<p>Loads the Tailscale client in this browser, connects to the control server, asks for a sign-in address, and then uses two throwaway devices to pass a packet through a Tailscale relay to open a TCP connection over WireGuard through it, and to make HTTP, HTTPS and WebSocket requests over that. It does not sign in. Add <code>?report</code> to send the result to the server log.</p>
 <pre id="out">running…</pre>
-<script src="/node/wasm_exec.js"></script>
-<script>
-(async () => {
-  const out = { ua: navigator.userAgent, secure: window.isSecureContext, sw: "serviceWorker" in navigator };
-  const t0 = performance.now();
-  const ms = () => Math.round(performance.now() - t0);
-  try {
-    const go = new Go();
-    const { instance } = await WebAssembly.instantiateStreaming(fetch("/node/main.wasm"), go.importObject);
-    out.loadedMs = ms();
-    go.run(instance);
-    const ipn = newIPN({ hostname: "porthole-test", panicHandler: (e) => { out.panic = String(e); } });
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("timed out after 45 s; last state " + out.state)), 45000);
-      let asked = false;
-      ipn.run({
-        notifyState: (s) => { out.state = s; if (s === "NeedsLogin" && !asked) { asked = true; out.readyMs = ms(); ipn.login(); } },
-        notifyNetMap: () => {},
-        notifyBrowseToURL: (url) => { out.signInAddressMs = ms(); out.gotSignInAddress = /^https:\/\/login\.tailscale\.com\//.test(url); clearTimeout(timer); resolve(); },
-        notifyPanicRecover: (e) => { out.recovered = String(e); },
-      });
-    });
-    out.wasmMemoryMB = Math.round(instance.exports.mem.buffer.byteLength / 1048576);
-    out.ok = out.gotSignInAddress === true;
-  } catch (e) {
-    out.ok = false;
-    out.error = String(e && e.message || e);
+<iframe id="frame" title="A page from the second device" style="width:320px;height:60px;border:1px solid gray"></iframe>
+<script src="/__tailnet/codec.js"></script>
+<script type="module">
+const out = { ua: navigator.userAgent, secure: window.isSecureContext };
+const t0 = performance.now();
+const ms = () => Math.round(performance.now() - t0);
+// With ?report, each finished stage is logged too, so a run that stops can be placed.
+const reporting = new URLSearchParams(location.search).has("report");
+const stage = (name) => { if (reporting) fetch("/test/report?" + new URLSearchParams({ suite: "client", stage: name, at: ms() })).catch(() => {}); };
+// A crash inside the client shows up only in the console, so pass those on.
+if (reporting) {
+  const consoleError = console.error;
+  console.error = (...args) => { stage("console.error: " + args.map(String).join(" ").slice(0, 1800)); consoleError(...args); };
+  addEventListener("error", (ev) => stage("page error: " + ev.message));
+  addEventListener("unhandledrejection", (ev) => stage("unhandled rejection: " + (ev.reason?.message ?? ev.reason)));
+}
+try {
+  const { default: init, Client, relayCheck, pathCheck, siteCheck, pairedClient, netmapCheck, recoveryCheck, abandonCheck } = await import("/test/client/porthole_client.js");
+  const wasm = await init();
+  out.loadedMs = ms();
+  stage("loaded");
+  const client = new Client("porthole-test", true);
+  const saved = JSON.parse(client.state());
+  out.stateKeys = Object.keys(saved).sort().join(",");
+  const address = await Promise.race([
+    client.signInAddress(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("timed out after 45 s")), 45000)),
+  ]);
+  out.signInAddressMs = ms();
+  stage("sign-in address");
+  out.gotSignInAddress = /^https:\/\/login\.tailscale\.com\//.test(address ?? "");
+  // A made-up device list goes through the code a real one takes.
+  const devices = JSON.parse(await netmapCheck());
+  const seen = devices.peers.map((p) => `${p.name.split(".")[0]}:${p.online}`).sort().join(" ");
+  if (devices.self.name !== "porthole.tail1234.ts.net." || devices.self.addresses[0] !== "100.64.0.1" || seen !== "laptop:false nas:true phone:false pi:false") {
+    throw new Error("device list: got " + JSON.stringify(devices));
   }
-  document.getElementById("out").textContent = JSON.stringify(out, null, 2);
-  document.title = out.ok ? "CLIENT OK" : "CLIENT FAILED";
-  if (new URLSearchParams(location.search).has("report")) fetch("/test/report?" + new URLSearchParams({ suite: "client", ...out }));
-})();
+  out.deviceListOk = true;
+  stage("device list");
+
+  // An answer from the control server is abandoned unread, as signing out
+  // and cancelled requests do.
+  await abandonCheck();
+  out.abandonOk = true;
+  stage("abandoned response");
+
+  // Two throwaway devices pass a packet through one of Tailscale's relays.
+  const relayStart = ms();
+  await Promise.race([
+    relayCheck("derp1.tailscale.com"),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("relay check timed out after 30 s")), 30000)),
+  ]);
+  out.relayPacketMs = ms() - relayStart;
+  out.relayOk = true;
+  stage("relay");
+  // The whole path: two throwaway devices set up WireGuard through the relay
+  // and one opens a TCP connection to the other.
+  const pathStart = ms();
+  await Promise.race([
+    pathCheck("derp1.tailscale.com"),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("path check timed out after 30 s")), 30000)),
+  ]);
+  out.pathMs = ms() - pathStart;
+  out.pathOk = true;
+  stage("path");
+  // Both devices lose their relay connections and must recover unaided.
+  const recoveryStart = ms();
+  await Promise.race([
+    recoveryCheck("derp1.tailscale.com"),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("recovery check timed out after 40 s")), 40000)),
+  ]);
+  out.recoveryMs = ms() - recoveryStart;
+  out.recoveryOk = true;
+  stage("recovery");
+
+  // What pages use: HTTP, HTTPS with the certificate checked, a cookie kept
+  // and sent back, and a WebSocket, all between the two devices.
+  const siteStart = ms();
+  await Promise.race([
+    siteCheck("derp1.tailscale.com"),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("site check timed out after 30 s")), 30000)),
+  ]);
+  out.siteMs = ms() - siteStart;
+  out.siteOk = true;
+  stage("site");
+
+  // The calls the app's bridge makes, from JavaScript, against a client
+  // whose only other device serves a page on port 80 and an echoing
+  // WebSocket on port 8080.
+  const apiStart = ms();
+  const expect = (what, ok, got) => { if (!ok) throw new Error(`page API: ${what}` + (got === undefined ? "" : `, got ${JSON.stringify(got)}`)); };
+  const paired = await pairedClient("derp1.tailscale.com");
+  const site = "http://device-b.test/";
+  const fetchText = async (options) => {
+    const res = await paired.request(options);
+    let text = "";
+    for (let piece; (piece = await res.read()) !== null;) text += new TextDecoder().decode(piece);
+    return { res, text, after: await res.read() };
+  };
+  const first = await fetchText({ url: site, headers: [["X-Test", "1"]] });
+  expect("status", first.res.status === 200 && first.res.statusText === "OK", [first.res.status, first.res.statusText]);
+  expect("url", first.res.url === site, first.res.url);
+  expect("headers are [name, value] pairs", Array.isArray(first.res.headers) && first.res.headers.some(([k, v]) => k.toLowerCase() === "content-type" && v === "text/plain"), first.res.headers);
+  expect("body", first.text === "hello", first.text);
+  expect("read() after the end", first.after === null, first.after);
+  expect("cookie from the response", paired.cookies(site) === "seen=1", paired.cookies(site));
+  paired.setCookie(site, "theme=dark; path=/");
+  expect("cookie from a script", paired.cookies(site) === "seen=1; theme=dark", paired.cookies(site));
+  const second = await fetchText({ url: site, method: "POST", body: new TextEncoder().encode("x") });
+  expect("cookie sent back", second.text === "hello again", second.text);
+  stage("api requests");
+  const jar = JSON.parse(paired.exportCookies());
+  expect("exported cookies", jar.length === 2 && jar.every((c) => c.session === true && c.line && c.url), jar);
+  const cancelled = await paired.request({ url: site });
+  cancelled.cancel();
+  expect("read() after cancel()", await cancelled.read() === null);
+  const refused = await paired.request({ url: "http://nowhere.test/" }).then(() => "resolved", (e) => String(e.message));
+  expect("unknown device rejects", refused !== "resolved" && refused.includes("nowhere.test"), refused);
+  stage("api refusals");
+
+  const socketLog = await new Promise((resolve, reject) => {
+    const log = [];
+    setTimeout(() => reject(new Error("page API: WebSocket timed out; saw " + JSON.stringify(log))), 20000);
+    const socket = paired.websocket({
+      url: "ws://device-b.test:8080/",
+      onOpen: (protocol) => { log.push(["open", protocol]); socket.send("ping"); socket.send(new Uint8Array([1, 2, 3])); },
+      onMessage: (data) => {
+        log.push(["message", typeof data === "string" ? data : Array.from(data)]);
+        if (typeof data !== "string") socket.close(1000, "done");
+      },
+      onError: (message) => log.push(["error", message]),
+      onClose: (code, reason, clean) => { log.push(["close", code, reason, clean]); resolve(log); },
+    });
+  });
+  expect("WebSocket", JSON.stringify(socketLog) === JSON.stringify([["open", ""], ["message", "ping"], ["message", [1, 2, 3]], ["close", 1000, "done", true]]), socketLog);
+  out.apiMs = ms() - apiStart;
+  out.apiOk = true;
+  stage("api");
+
+  // The app's own bridge and service worker, showing a page from the other
+  // device in a frame.
+  const frameStart = ms();
+  const { createBridge } = await import("/app/bridge.js");
+  stage("bridge loaded");
+  const navigated = [];
+  const shown = new Promise((resolve, reject) => {
+    setTimeout(() => reject(new Error("the frame did not load within 20 s; saw " + JSON.stringify(navigated))), 20000);
+    addEventListener("message", (ev) => { if (ev.data?.type === "device-b-page") resolve({ origin: ev.origin, ...ev.data }); });
+  });
+  const bridge = createBridge({
+    frame: document.getElementById("frame"),
+    request: (req) => paired.request(req),
+    websocket: (options) => paired.websocket(options),
+    cookies: { get: (url) => paired.cookies(url), set: (url, text) => paired.setCookie(url, text) },
+    onNavigated: (url) => navigated.push(url),
+    onError: (message) => navigated.push("error: " + message),
+  });
+  // Raced with the timeout above, so a frame that never loads is reported.
+  await Promise.race([bridge.go("http://device-b.test/page"), shown]);
+  const page = await shown;
+  expect("frame is on the site's own address", page.origin === `${location.protocol}//device-b--test--h.${location.host}`, page.origin);
+  expect("frame sees the cookie", page.cookie.includes("seen=1") && page.cookie.includes("theme=dark"), page.cookie);
+  expect("bridge reported the page", navigated.at(-1) === "http://device-b.test/page", navigated);
+  out.frameMs = ms() - frameStart;
+  out.frameOk = true;
+  paired.free();
+  out.wasmMemoryMB = Math.round(wasm.memory.buffer.byteLength / 1048576 * 10) / 10;
+  out.ok = out.gotSignInAddress === true && out.deviceListOk === true && out.abandonOk === true && out.recoveryOk === true && out.relayOk === true && out.pathOk === true && out.siteOk === true && out.apiOk === true && out.frameOk === true;
+} catch (e) {
+  out.ok = false;
+  out.error = String(e && e.message || e);
+}
+document.getElementById("out").textContent = JSON.stringify(out, null, 2);
+document.title = out.ok ? "CLIENT OK" : "CLIENT FAILED";
+if (new URLSearchParams(location.search).has("report")) fetch("/test/report?" + new URLSearchParams({ suite: "client", ...out }));
 </script>
 </body>

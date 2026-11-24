@@ -1,14 +1,9 @@
 //! Porthole's Tailscale client for browser tabs.
 //!
-//! This is the start of a replacement for the Go client in `web/node/`. It is
-//! built on Tailscale's own Rust crates (tailscale-rs) and exists to be much
-//! smaller and to run in older browsers.
-//!
-//! So far it covers the control plane and the relay connection: it creates
-//! or restores the device's keys, connects to the control server, reports the
-//! address where the user signs in, follows the list of devices, and can pass
-//! packets through a relay. Talking to other devices (WireGuard and
-//! everything above it) is not implemented yet.
+//! Built on Tailscale's own Rust crates (tailscale-rs). It creates or
+//! restores the device's keys, signs in through the control server, follows
+//! the list of devices, and reaches them through Tailscale's relays with
+//! WireGuard, TCP, TLS, HTTP and WebSockets. README.md has the details.
 
 mod challenge;
 mod cookies;

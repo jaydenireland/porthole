@@ -1,6 +1,6 @@
 # Porthole
 
-Browse a Tailscale network from a browser tab. The tab runs Tailscale's client
+Browse a Tailscale network from a browser tab. The tab runs a Tailscale client
 compiled to WebAssembly, joins the tailnet as an ephemeral device, and shows
 tailnet sites in a frame. Everything here is static files; there is no server
 component.
@@ -17,13 +17,13 @@ component.
 | `__tailnet/codec.js` | maps a tailnet origin to a subdomain label and back. |
 | `__tailnet/relay.html` | hidden page on each site's subdomain; installs the worker there and passes its requests up to the app. |
 | `__tailnet/page.js` | added to every tailnet page by the worker; routes `WebSocket` and `document.cookie` through the client. |
-| `node/main.wasm`, `node/wasm_exec.js` | the built client and Go's loader. |
-| `app/rust-client.js` | lets the app run on the Rust client in `/client` when opened with `?client=rust`. |
-| `tsconnect.patch` | our changes to Tailscale's `cmd/tsconnect/wasm`. |
-| `make-patch.sh` | rewrites `tsconnect.patch` from the changes in the Tailscale checkout. |
-| `build.sh` | rebuilds `node/` from a patched Tailscale checkout. |
+| `app/client.js` | loads the Tailscale client and reports its progress to the app as a state. |
+| `client/` | the built client. Not in the repository; `../client/build.sh` writes it. |
+| `test/client/` | the same with logging and the test pages' checks. The app loads it when opened with `?debug`. |
 | `compatibility/index.html` | the supported browsers and devices page. |
-| `test/client.html` | starts the client in the current browser and asks Tailscale for a sign-in address, without signing in. |
+| `test/client.html` | tests the client in the current browser without signing in: a sign-in address from Tailscale, then requests between two throwaway devices. |
+| `test/client-signin.html` | signs in to your tailnet and connects to a device you pick. |
+| `test/sockets.html` | opens each connection the client needs and says which ones fail. |
 | `test/mock.html` | tests everything except the client itself, against fake sites; needs no tailnet. |
 
 ## How a site is shown
@@ -46,31 +46,10 @@ needs a wildcard DNS record and a wildcard certificate for `*.<app host>`.
 
 Open `/test/mock.html` to run the tests.
 
-## Rebuild the node
+## The client
 
-`tsconnect.patch` adds to Tailscale's browser client:
-
-- `roots_js.go`: bundles the Mozilla root CAs (Go on js/wasm has no system
-  certificate store, so HTTPS verification fails without it).
-- `request_js.go`: `ipn.request({url, method, headers, body})`, with no
-  automatic redirects; resolves at the headers and hands back a chunked body
-  reader, so streamed responses work.
-- `cookies_js.go`: the in-memory cookie jar shared by requests and sockets,
-  split so HttpOnly cookies stay hidden from pages; `ipn.cookies(url)` and
-  `ipn.setCookie(url, line)` back `document.cookie`.
-- `wasm_js.go`: one added setting, `ephemeral: false`, which registers a
-  normal device for the "Stay signed in" option. The default stays ephemeral.
-- `websocket_js.go`: `ipn.websocket({url, protocols, headers, on...})`,
-  a WebSocket client over the tailnet that shares the cookie jar.
-
-From a checkout of https://github.com/tailscale/tailscale (made against
-commit 66e3d82):
-
-    git apply /path/to/web/tsconnect.patch
-    RUN_TESTS=1 /path/to/web/build.sh "$PWD"
-
-`wasm_exec.js` must come from the same Go version that built `main.wasm`;
-`build.sh` copies it for you.
+The client is built from `../client`; see its README. `../client/build.sh`
+writes it to `client/` and `test/client/`.
 
 ## Checking a browser
 
@@ -78,5 +57,6 @@ Open `/test/mock.html?report` and `/test/client.html?report` in the browser.
 With `?report`, each page sends its result to `/test/report?...`, which shows
 up in the static server's request log. The minimum versions on the
 compatibility page come from MDN's browser compatibility data for the features
-the code uses, plus a scan of `node/main.wasm` for post-MVP instructions
-(bulk memory, sign extension and saturating conversions are present).
+the code uses. For the client's WebAssembly those are bulk memory, sign
+extension and saturating conversions; `../client/build.sh` fails if the
+client needs any other.

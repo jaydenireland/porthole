@@ -1,40 +1,43 @@
-// The Rust build of the Tailscale client (see /client/README.md), dressed as
-// the Go one, so the app can run on either. Open the app with ?client=rust
-// to use it.
+// Loads Porthole's Tailscale client (see /client/README.md) and gives the app
+// one object to drive it with.
 //
-// The Go client is a state machine the app watches: it reports a state
-// ("NeedsLogin", "Running", ...) and the app reacts. The Rust client is a set
-// of calls that resolve when a step is done. This file turns one into the
-// other.
+// The client is a set of calls that resolve when a step is done. The app
+// follows a state instead ("NeedsLogin", "Running", ...), in the terms of
+// Tailscale's own clients. This file turns one into the other.
 
-const STATE_ID = "rust";  // stored by the app as "ipn-state-rust"
+// The name the device's keys are stored under. It dates from when there
+// were two clients; changing it would sign everyone out.
+export const STATE_ID = "rust";
 
 // How long to wait for other devices to be able to answer before letting
 // the user browse anyway. The client keeps trying in the background.
 const READY_WAIT_MS = 8000;
 
-// What the client has reported, newest last, for the app's "Details" panel.
-// The Rust code writes to the console; this keeps a copy.
+// What has happened, newest last, for the app's "Details" panel.
 const log = [];
 function note(...parts) {
   const seconds = (performance.now() / 1000).toFixed(1).padStart(6);
   log.push(`${seconds}s  ${parts.map(String).join(" ").trim()}`);
   if (log.length > 300) log.shift();
 }
-for (const level of ["debug", "log", "info", "warn", "error"]) {
-  const original = console[level].bind(console);
-  console[level] = (...args) => { note(...args); original(...args); };
+// The debug build of the client writes to the console; keep a copy.
+function captureConsole() {
+  for (const level of ["debug", "log", "info", "warn", "error"]) {
+    const original = console[level].bind(console);
+    console[level] = (...args) => { note(...args); original(...args); };
+  }
 }
 
 export async function createIPN(config) {
-  note("loading the Rust client");
+  if (config.debug) captureConsole();
+  note(config.debug ? "loading the client (debug build)" : "loading the client");
   globalThis.__portholeClientCrashed = (message) => {
     note("the client crashed:", message);
     config.panicHandler?.(message);
   };
-  const { default: init, Client } = await import("/client/porthole_client.js");
+  // The debug build has logging and the test pages' checks; see /client/build.sh.
+  const { default: init, Client } = await import(config.debug ? "/test/client/porthole_client.js" : "/client/porthole_client.js");
   await init();
-  config.onProgress?.(1);
 
   const saved = config.stateStorage.getState(STATE_ID) || undefined;
   const client = new Client(config.hostname, config.ephemeral !== false, saved);

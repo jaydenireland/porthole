@@ -57,7 +57,7 @@
 <main class="wrap">
   <div class="intro">
     <h1>Supported browsers and devices</h1>
-    <p>Porthole runs a full Tailscale client inside the page, so it needs a fairly recent browser. This page separates what has been tested from what should work on paper and what cannot work.</p>
+    <p>Porthole runs a Tailscale client inside the page, so it needs a fairly recent browser. This page separates what has been tested from what should work on paper and what cannot work.</p>
     <p class="note">Last checked in November 2026.</p>
     <div class="legend">
       <span><i class="chip tested">Tested</i> run by us and passing</span>
@@ -74,11 +74,11 @@
       <thead><tr><th>Browser</th><th>Minimum version</th><th>Status</th><th>Notes</th></tr></thead>
       <tbody>
         <tr><td>Chrome</td><td class="num">84</td><td><span class="chip tested">Tested</span></td><td>Version 157 on macOS passes every test.</td></tr>
-        <tr><td>Firefox</td><td class="num">90</td><td><span class="chip tested">Tested</span></td><td>Version 159 on macOS passes every test.</td></tr>
-        <tr><td>Safari on Mac</td><td class="num">16</td><td><span class="chip tested">Tested</span></td><td>Version 26.6 passes. One of three runs timed out on a page load the first time the site was opened.</td></tr>
+        <tr><td>Firefox</td><td class="num">90</td><td><span class="chip tested">Tested</span></td><td>Version 162 on macOS passes every test.</td></tr>
+        <tr><td>Safari on Mac</td><td class="num">16</td><td><span class="chip meets">Meets requirements</span></td><td>Version 26.6 passes the page-loading test. The client test has passed only in part, because Safari slows tabs that are not in front.</td></tr>
         <tr><td>Edge</td><td class="num">84</td><td><span class="chip meets">Meets requirements</span></td><td>Same engine as Chrome.</td></tr>
         <tr><td>Chrome on Android</td><td class="num">84</td><td><span class="chip meets">Meets requirements</span></td><td>Tailscale has an Android app, which is the better choice on your own phone.</td></tr>
-        <tr><td>Safari on iPhone and iPad<small>and every other browser on iOS</small></td><td class="num">iOS 16</td><td><span class="chip meets">Meets requirements</span></td><td>All iOS browsers use Safari's engine. Tailscale has an iOS app as well.</td></tr>
+        <tr><td>Safari on iPhone and iPad<small>and every other browser on iOS</small></td><td class="num">iOS 16</td><td><span class="chip tested">Tested</span></td><td>Used by hand on a real tailnet on a current iPhone. All iOS browsers use Safari's engine. Tailscale has an iOS app as well.</td></tr>
         <tr><td>Samsung Internet</td><td class="num">14</td><td><span class="chip meets">Meets requirements</span></td><td></td></tr>
         <tr><td>Internet Explorer<small>and Edge 18 or older</small></td><td class="num">none</td><td><span class="chip no">Not supported</span></td><td>These cannot run the Tailscale client.</td></tr>
       </tbody>
@@ -111,7 +111,7 @@
   </div>
 
   <h2 id="requirements">What sets the minimum versions</h2>
-  <p class="note">Two layers decide whether a browser can run Porthole. The Tailscale client sets a floor that we cannot lower. Porthole's own code sets a slightly higher one that we could lower with more work.</p>
+  <p class="note">Two layers decide whether a browser can run Porthole. The Tailscale client sets a floor through the WebAssembly features it is built with. Porthole's page scripts set a slightly higher one. Both could be lowered with more work.</p>
   <div class="scroll">
     <table>
       <thead><tr><th>Requirement</th><th>Chrome</th><th>Firefox</th><th>Safari</th><th>Needed by</th></tr></thead>
@@ -127,13 +127,13 @@
       </tbody>
     </table>
   </div>
-  <p class="note">Porthole also needs to be opened over HTTPS, and the network must allow WebSocket connections to Tailscale. The client is a 30 MB download and used 18 MB of WebAssembly memory at the sign-in screen in all three tested browsers.</p>
+  <p class="note">Porthole also needs to be opened over HTTPS, and the network must allow WebSocket connections to Tailscale. The client is a 1 MB download and used about 4 MB of WebAssembly memory during the client test in Chrome and Firefox.</p>
 
   <h2 id="method">How this was checked</h2>
   <ul class="method">
-    <li>Tested browsers ran two automated tests on a Mac. The first starts the Tailscale client and asks Tailscale for a sign-in address. The second runs 47 checks of page loading, redirects, forms, cookies, WebSockets, streaming and tab takeover against stand-in sites.</li>
-    <li>Browsing a real tailnet end to end has so far been checked by hand, not in every browser listed as tested.</li>
-    <li>Minimum versions come from MDN's browser compatibility data for each feature the code uses, and from scanning the client's WebAssembly for the instructions it contains.</li>
+    <li>Tested desktop browsers ran two automated tests on a Mac. The first starts the Tailscale client, asks Tailscale for a sign-in address, and then passes HTTP, HTTPS and WebSocket traffic between two throwaway devices through a Tailscale relay. The second runs 47 checks of page loading, redirects, forms, cookies, WebSockets, streaming and tab takeover against stand-in sites.</li>
+    <li>Browsing a real tailnet end to end has so far been checked by hand, on an iPhone only.</li>
+    <li>Minimum versions come from MDN's browser compatibility data for each feature the code uses, and from the client's build, which fails if its WebAssembly needs any feature beyond the three listed.</li>
     <li>TV engine versions come from the Samsung and LG developer sites. Those tables describe each TV's web engine. Samsung's does not say whether the built-in browser app matches it.</li>
   </ul>
 </main>
