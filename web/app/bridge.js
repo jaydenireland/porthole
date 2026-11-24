@@ -21,9 +21,13 @@ export async function removeAppWorker() {
 }
 
 // frame:       the visible iframe
-// request:     ({url, method, headers, body}) =>
+// request:     ({url, method, headers, body, from, topLevel}) =>
 //                Promise<{status, statusText, url, headers, read(), cancel()}>
 //              read() resolves to the next body chunk (Uint8Array) or null at the end.
+//              from is the tailnet origin of the page that caused the request (or
+//              another website's origin, or null if unknown) and topLevel says it
+//              loads a page as a tab would; the node uses both to decide which
+//              SameSite cookies to send.
 // websocket:   ({url, protocols, headers, onOpen, onMessage, onClose, onError}) => {send, close}
 // cookies:     { get(url) => string, set(url, text) }: what document.cookie reads and writes
 // onNavigated: (tailnetUrl, how) => void. how is "load" after a page navigation
@@ -39,6 +43,8 @@ export async function removeAppWorker() {
 export function createBridge({ frame, request, websocket, cookies, onNavigated, onTitle, onCookiesChanged, onError, onSuperseded }) {
   const relays = new Map();  // site origin -> { el, upstreamOrigin, pages, ready, resolve, reject }
   let current = "";  // the address the frame's page last reported; "" while one loads
+  let shown = null;  // the relay of the site in the frame
+  let asked = null;  // { relay, from }: a page of another site sent the frame to this one
 
   // Only one tab browses at a time. A site's service worker is shared by
   // every tab and cannot tell which tab a request came from, so two active
@@ -86,12 +92,15 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
     return relay.ready.then(() => site);
   }
 
-  // Show a tailnet URL in the frame.
-  async function go(input) {
+  // Show a tailnet URL in the frame. from is the tailnet origin of the page
+  // that asked, when a page did and not the user.
+  async function go(input, from) {
     if (!active) throw new Error("Porthole is open in another tab.");
     const upstream = typeof input === "string" ? parseAddress(input) : input;
     const site = await relayFor(upstream);
     if (!active) throw new Error("Porthole is open in another tab.");
+    shown = relays.get(site);
+    asked = from ? { relay: shown, from } : null;
     // Setting the frame to the address it is already on, "#" part included,
     // would not load anything, so ask the page to reload itself.
     if (upstream.hash && upstream.href === current) frame.contentWindow.postMessage({ type: "tailnet-reload" }, site);
@@ -103,11 +112,27 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
       // A site may only reach its own tailnet origin; this is what keeps
       // sites isolated from each other.
       if (new URL(data.req.url).origin !== relay.upstreamOrigin) throw new Error("Blocked a request outside this site's own origin.");
-      const r = await request(data.req);
+      const req = data.req;
+      if (req.from === location.origin) {
+        // We loaded this page into the frame, which is the tab as far as the
+        // site is concerned: for the user, unless a page of another site asked.
+        req.from = asked?.relay === relay ? asked.from : relay.upstreamOrigin;
+        req.topLevel = true;
+      } else if (data.nav && req.from == null && !req.topLevel && (req.method === "GET" || req.method === "HEAD") && shown === relay) {
+        // A page that hides its referrer followed one of its own links. A
+        // frame that another site's page put this site in does not get here:
+        // the site in our frame is then the other one.
+        req.from = relay.upstreamOrigin;
+      }
+      const r = await request(req);
       const res = { status: r.status, statusText: r.statusText, url: r.url, headers: r.headers };
       if (data.doc) res.cookies = cookies.get(data.req.url);
       if (r.headers.some(([k]) => k.toLowerCase() === "set-cookie")) cookiesChanged(relay);
-      if (data.nav && !(r.status >= 300 && r.status < 400)) { current = ""; onNavigated?.(data.req.url, "load"); }
+      if (data.nav && !(r.status >= 300 && r.status < 400)) {
+        if (asked?.relay === relay) asked = null;  // kept until here so a redirect on the way counts the same
+        current = "";
+        onNavigated?.(data.req.url, "load");
+      }
       port.postMessage({ ok: true, res });
       streamBody(r, port);
     } catch (e) {
@@ -217,7 +242,7 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
       else if (data.type === "tailnet-request" && ev.ports[0]) serve(relay, data, ev.ports[0]);
     } else if (ev.source === frame.contentWindow) {
       // Sent by pages our service worker generates.
-      if (data.type === "tailnet-navigate") go(String(data.url)).catch((e) => onError?.(String(e?.message ?? e)));
+      if (data.type === "tailnet-navigate") go(String(data.url), relay.upstreamOrigin).catch((e) => onError?.(String(e?.message ?? e)));
       else if (data.type === "tailnet-error") onError?.(`${data.url}: ${data.message}`);
       else if (data.type === "tailnet-location") {
         // Sent by __tailnet/page.js. It only names a path; the origin is
@@ -226,6 +251,7 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
         try { url = new URL(String(data.path), relay.upstreamOrigin); } catch { return; }
         if (url.origin !== relay.upstreamOrigin) return;
         current = url.href;
+        shown = relay;
         onNavigated?.(url.href, ["push", "replace", "move"].includes(data.how) ? data.how : "move");
       } else if (data.type === "tailnet-title") {
         onTitle?.(String(data.title ?? "").trim().slice(0, 300));

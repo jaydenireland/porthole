@@ -4,7 +4,8 @@
 //! app, so the app's bridge can use either:
 //!
 //! ```text
-//! request({ url, method?, headers?: [name, value][], body?: Uint8Array })
+//! request({ url, method?, headers?: [name, value][], body?: Uint8Array,
+//!           from?: string | null, topLevel?: boolean })
 //!   -> Promise<{ status, statusText, url, headers: [name, value][],
 //!                read(): Promise<Uint8Array | null>, cancel() }>
 //! websocket({ url, protocols?: string[], headers?: [name, value][],
@@ -32,6 +33,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{future_to_promise, spawn_local};
 
 use crate::{
+    cookies::Context,
     error::Error,
     http::{Body, Request},
     tab::{Client, Inner},
@@ -88,10 +90,17 @@ fn function<F: ?Sized + wasm_bindgen::closure::WasmClosure>(closure: Closure<F>)
 #[wasm_bindgen]
 impl Client {
     /// Send an HTTP request to a tailnet site. Redirects are not followed.
+    ///
+    /// `from` is the origin of the page that caused the request, such as
+    /// `http://nas`, or `null` when it is not known. A request another site
+    /// caused goes without the cookies marked `SameSite`; `topLevel` says it
+    /// loads a page as a tab would, which lets `SameSite=Lax` cookies
+    /// through on a GET. Leave `from` out for a request the site itself or
+    /// the user made.
     /// Read the body with `read()` until it resolves to `null`, or call
     /// `cancel()`; either closes the connection.
     pub async fn request(&self, options: JsValue) -> Result<JsValue, Error> {
-        const USAGE: &str = "request({url, method?, headers?, body?})";
+        const USAGE: &str = "request({url, method?, headers?, body?, from?, topLevel?})";
         let inner = self.inner.clone();
         let url = url_of(&options, USAGE)?;
         let body = get(&options, "body");
@@ -106,7 +115,15 @@ impl Client {
             },
         };
 
-        let (head, body, _cookies_changed) = inner.site.request(request).await?;
+        let from = get(&options, "from");
+        let context = if from.is_undefined() {
+            Context::SameSite
+        } else {
+            let top_level = get(&options, "topLevel").is_truthy();
+            Context::of(from.as_string().as_deref(), &url, &request.method, top_level)
+        };
+
+        let (head, body, _cookies_changed) = inner.site.request_in(request, context).await?;
 
         let headers = Array::new();
         for (name, value) in &head.headers {

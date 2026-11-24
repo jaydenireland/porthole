@@ -11,10 +11,12 @@
 //!   replaced by them.
 //! - A site cannot set a cookie for a whole public suffix, such as `ts.net`,
 //!   which would be sent to other people's tailnets.
+//! - A cookie marked `SameSite` is held back from requests that another site
+//!   caused, so a page elsewhere cannot act with the user's login here.
 //! - The jar can be saved as text and loaded again, so logins survive a
 //!   reload.
 
-use cookie::Cookie as RawCookie;
+use cookie::{Cookie as RawCookie, SameSite};
 use cookie_store::{Cookie, CookieDomain, CookieExpiration, CookieStore};
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -35,6 +37,62 @@ struct Saved {
     session: bool,
     /// The expiry date as Unix seconds; 0 for a session cookie.
     expires: i64,
+}
+
+/// Who caused a request, which decides the cookies it carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Context {
+    /// The site itself, or the user: every cookie is sent.
+    SameSite,
+    /// Another site sent the user here by loading a page with GET or HEAD.
+    /// `SameSite=Strict` cookies stay behind.
+    CrossSiteNavigation,
+    /// Anything else another site caused, such as a form it posted or a page
+    /// it loaded in a frame. Only `SameSite=None` cookies are sent.
+    CrossSite,
+}
+
+impl Context {
+    /// The context of a `method` request to `target` caused by a page at
+    /// `initiator` (an origin such as `http://nas`; `None` when nobody can
+    /// say who it was). `top_level` says the request loads a page as a tab
+    /// would, not inside a frame of another page.
+    pub fn of(initiator: Option<&str>, target: &Url, method: &str, top_level: bool) -> Self {
+        let same = initiator
+            .and_then(|origin| Url::parse(origin).ok())
+            .and_then(|origin| site(&origin))
+            .is_some_and(|theirs| site(target) == Some(theirs));
+        if same {
+            Self::SameSite
+        } else if top_level && (method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD")) {
+            Self::CrossSiteNavigation
+        } else {
+            Self::CrossSite
+        }
+    }
+
+    /// Whether a request in this context carries `cookie`. A cookie that
+    /// does not say is treated as `Lax`, as Chrome does.
+    fn carries(self, cookie: &Cookie<'static>) -> bool {
+        match (self, cookie.same_site()) {
+            (Self::SameSite, _) | (_, Some(SameSite::None)) => true,
+            (_, Some(SameSite::Strict)) => false,
+            (context, Some(SameSite::Lax) | None) => context == Self::CrossSiteNavigation,
+        }
+    }
+}
+
+/// The site `url` belongs to: the name one party registered
+/// (`tail1234.ts.net` for `nas.tail1234.ts.net`), or the whole host for an
+/// address or a name with no dots. The scheme and port do not count.
+fn site(url: &Url) -> Option<String> {
+    match url.host()? {
+        url::Host::Domain(name) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            Some(psl::domain_str(&name).map(str::to_owned).unwrap_or(name))
+        }
+        address => Some(address.to_string()),
+    }
 }
 
 /// Whether `domain` is one that many unrelated parties have names under.
@@ -96,9 +154,17 @@ impl Jar {
         changed
     }
 
-    /// The `Cookie` header for a request to `url`, if there is anything to send.
+    /// The `Cookie` header for a request to `url` that the site itself or
+    /// the user made, if there is anything to send.
     pub fn header_for(&self, url: &Url) -> Option<String> {
-        let header = joined(in_order(self.store.matches(url)));
+        self.header_in(url, Context::SameSite)
+    }
+
+    /// The `Cookie` header for a request to `url` made in `context`, if
+    /// there is anything to send.
+    pub fn header_in(&self, url: &Url, context: Context) -> Option<String> {
+        let sent = self.store.matches(url).into_iter().filter(|cookie| context.carries(cookie));
+        let header = joined(in_order(sent.collect()));
         (!header.is_empty()).then_some(header)
     }
 
@@ -264,5 +330,39 @@ mod tests {
         loaded.import("not json");
         loaded.import(r#"[{"url":"nonsense","line":"a=b","session":true,"expires":0}]"#);
         assert_eq!(loaded.script_cookies(&page), "theme=dark");
+    }
+
+    #[test]
+    fn works_out_who_counts_as_the_same_site() {
+        let nas = url("http://nas.tail1234.ts.net/");
+        let of = |from, method, top| Context::of(from, &nas, method, top);
+        assert_eq!(of(Some("http://nas.tail1234.ts.net"), "POST", false), Context::SameSite);
+        assert_eq!(of(Some("https://pi.tail1234.ts.net:8443"), "POST", false), Context::SameSite, "one tailnet is one site");
+        assert_eq!(of(Some("http://nas.tail9999.ts.net"), "POST", true), Context::CrossSite, "another tailnet is not");
+        assert_eq!(of(Some("https://evil.example"), "GET", true), Context::CrossSiteNavigation);
+        assert_eq!(of(Some("https://evil.example"), "GET", false), Context::CrossSite, "a frame is not a tab");
+        assert_eq!(of(Some("https://evil.example"), "POST", true), Context::CrossSite);
+        assert_eq!(of(Some("null"), "POST", true), Context::CrossSite);
+        assert_eq!(of(None, "GET", true), Context::CrossSiteNavigation);
+
+        let short = url("http://nas/");
+        assert_eq!(Context::of(Some("http://nas:8080"), &short, "POST", false), Context::SameSite);
+        assert_eq!(Context::of(Some("http://pi"), &short, "POST", false), Context::CrossSite);
+        let address = url("http://100.64.0.1/");
+        assert_eq!(Context::of(Some("http://100.64.0.1:81"), &address, "POST", false), Context::SameSite);
+        assert_eq!(Context::of(Some("http://100.64.0.2"), &address, "POST", false), Context::CrossSite);
+    }
+
+    #[test]
+    fn holds_same_site_cookies_back_from_other_sites() {
+        let page = url("https://nas.tail1234.ts.net/");
+        let jar = jar_with(
+            "https://nas.tail1234.ts.net/",
+            &["strict=1; SameSite=Strict", "lax=1; SameSite=Lax", "plain=1", "none=1; SameSite=None; Secure"],
+        );
+        let sent = |context| jar.header_in(&page, context);
+        assert_eq!(sent(Context::SameSite).as_deref(), Some("lax=1; none=1; plain=1; strict=1"));
+        assert_eq!(sent(Context::CrossSiteNavigation).as_deref(), Some("lax=1; none=1; plain=1"));
+        assert_eq!(sent(Context::CrossSite).as_deref(), Some("none=1"));
     }
 }

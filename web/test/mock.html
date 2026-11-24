@@ -112,6 +112,9 @@ addEventListener("load", async () => {
 });
 <\/script>`;
 
+// Where the fake site is shown, for the other site's pages that point at it.
+const FAKE_SHOWN = TailnetCodec.siteOrigin(new URL("http://fake.ts.net"), location);
+
 // Mirrors the node's request() contract.
 async function fakeSites(req) {
   seen.push(req);
@@ -119,6 +122,15 @@ async function fakeSites(req) {
   const reply = (status, headers, body = "") => ({ status, statusText: "", url: req.url, headers, body: enc(body) });
   const html = (body) => reply(200, [["Content-Type", "text/html; charset=utf-8"]], body);
   if (u.hostname === "down.ts.net") throw new Error("dial tcp: host is down");
+  // Another site's page posting a form to the fake site, as a forgery would.
+  if (u.origin === "http://other.ts.net:8080" && u.pathname === "/forge") {
+    return html(`<title>Forge</title><body><form id="f" method="POST" action="${FAKE_SHOWN}/submit"><input name="q" value="forged"></form>
+<script>document.getElementById("f").submit();<\/script>`);
+  }
+  // Another site's page showing the fake site in a frame, with the referrer hidden.
+  if (u.origin === "http://other.ts.net:8080" && u.pathname === "/frames") {
+    return html(`<title>Frames</title><body><iframe referrerpolicy="no-referrer" src="${FAKE_SHOWN}/landed?from=frame"></iframe>`);
+  }
   if (u.origin === "http://other.ts.net:8080") return html(`<title>Other</title><body>other site ${u.pathname}${REPORT}`);
   if (u.origin !== "http://fake.ts.net") return reply(404, [], "wrong origin " + u.origin);
   switch (u.pathname) {
@@ -167,6 +179,10 @@ history.replaceState(null, "", "/spa/two");
 addEventListener("hashchange", () => top.postMessage({ t: "spa" }, "*"));
 location.hash = "part";
 <\/script>`);
+    // A link to the site's own page that hides the referrer.
+    case "/quiet":
+      return html(`<title>Quiet</title><body><a id="q" rel="noreferrer" href="/landed?from=quiet">go</a>
+<script>document.getElementById("q").click();<\/script>`);
     case "/landed": return html(`<title>Landed</title><body>landed${REPORT}`);
     case "/submit": {
       const id = String(nextId++);
@@ -231,6 +247,7 @@ const results = [];
 const check = (name, ok, detail = "") => results.push(`${ok ? "PASS" : "FAIL"}  ${name}${ok ? "" : "  : " + (typeof detail === "string" ? detail : JSON.stringify(detail))}`);
 const header = (req, name) => req?.headers.find(([k]) => k.toLowerCase() === name)?.[1];
 const lastSeen = (path) => seen.findLast((r) => new URL(r.url).pathname === path);
+const origins = (req) => (req?.headers ?? []).filter(([k]) => k.toLowerCase() === "origin").map(([, v]) => v).join();
 
 // Wait for a message from a fake page.
 function next(pred, what) {
@@ -287,6 +304,9 @@ async function run() {
   check("fetch: custom request header forwarded", header(seen.find((r) => r.url.endsWith("/api") && r.method === "GET"), "x-mine") === "1");
   check("fetch follows a same-site redirect", out.apiRedirect.status === 200 && out.apiRedirect.json?.ok === true, out.apiRedirect);
   check("fetch PUT: method and Origin", out.put.method === "PUT" && header(seen.find((r) => r.method === "PUT"), "origin") === "http://fake.ts.net", out.put);
+  check("fetch PUT: one Origin, and the node is told the site itself asked",
+    origins(seen.find((r) => r.method === "PUT")) === "http://fake.ts.net" && seen.find((r) => r.method === "PUT").from === "http://fake.ts.net", origins(seen.find((r) => r.method === "PUT")));
+  check("a page the user opens counts as the site's own, in a tab", lastSeen("/").from === "http://fake.ts.net" && lastSeen("/").topLevel === true, [lastSeen("/").from, lastSeen("/").topLevel]);
   check("binary body intact", out.bytes === "0,255,128,7", out.bytes);
   check("204 passes through", out.nocontent === 204, String(out.nocontent));
   check("404 passes through", out.missing === 404, String(out.missing));
@@ -330,6 +350,8 @@ async function run() {
   check("form POST lands on the expected address", page.path.startsWith("/posted?id="), page.href);
   check("form POST method, body and content type", posted.method === "POST" && posted.body === "q=h%C3%A9llo" && posted.type === "application/x-www-form-urlencoded", posted);
 
+  check("form POST carries one Origin, the site's own", origins(lastSeen("/submit")) === "http://fake.ts.net" && lastSeen("/submit").from === "http://fake.ts.net", origins(lastSeen("/submit")));
+
   // 4. Navigation redirected to a different tailnet site moves to that site's subdomain.
   wait = next((d) => d.t === "page" && d.title === "Other", "other site");
   await bridge.go("http://fake.ts.net/?do=cross");
@@ -338,6 +360,30 @@ async function run() {
   check("cross-site redirect moves to the other subdomain", page.origin === OTHER && page.path === "/hello", page.href);
   check("other site reported to the app", navigated.at(-1) === "http://other.ts.net:8080/hello", navigated);
   check("each site only requested its own origin", seen.every((r) => ["http://fake.ts.net", "http://other.ts.net:8080"].includes(new URL(r.url).origin)));
+
+  check("a page reached through another site's redirect is marked as sent by that site",
+    lastSeen("/hello").from === "http://fake.ts.net" && lastSeen("/hello").topLevel === true, [lastSeen("/hello").from, lastSeen("/hello").topLevel]);
+
+  // 4a. Requests another site causes say so, so the site can refuse them and
+  // the node can hold back SameSite cookies.
+  wait = next((d) => d.t === "page" && d.title === "Posted", "page after a form posted by another site");
+  await bridge.go("http://other.ts.net:8080/forge");
+  await wait;
+  let forged = lastSeen("/submit");
+  check("a form posted by another site names that site in Origin, once", origins(forged) === "http://other.ts.net:8080", origins(forged));
+  check("a form posted by another site is marked as such for cookies", forged.from === "http://other.ts.net:8080" && forged.topLevel === false, [forged.from, forged.topLevel]);
+
+  wait = next((d) => d.t === "page" && d.path === "/landed?from=frame", "the site in another site's frame");
+  await bridge.go("http://other.ts.net:8080/frames");
+  await wait;
+  forged = seen.findLast((r) => r.url.endsWith("/landed?from=frame"));
+  check("a frame on another site's page with the referrer hidden is not taken for the site's own", forged.from === null && forged.topLevel === false, [forged.from, forged.topLevel]);
+
+  wait = next((d) => d.t === "page" && d.path === "/landed?from=quiet", "page after a link with no referrer");
+  await bridge.go("http://fake.ts.net/quiet");
+  await wait;
+  forged = seen.findLast((r) => r.url.endsWith("/landed?from=quiet"));
+  check("the site's own link with the referrer hidden still counts as its own", forged.from === "http://fake.ts.net", String(forged.from));
 
   // 4b. A page that changes its own address without loading.
   wait = next((d) => d.t === "spa", "address changes");

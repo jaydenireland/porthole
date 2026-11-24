@@ -15,7 +15,7 @@ use tokio_tungstenite::{
 use url::Url;
 
 use crate::{
-    cookies::Jar,
+    cookies::{Context, Jar},
     http::{self, Body, Connection, Head, Recycle, Request},
     tls,
 };
@@ -122,13 +122,19 @@ impl<D: Dialer> Site<D> {
         Ok(Box::new(stream))
     }
 
-    /// Send one request. The site's cookies are added, and the ones it sets
-    /// are kept; the last value says whether it set any.
-    pub async fn request(&self, mut request: Request) -> Result<(Head, Body, bool), Error> {
+    /// Send one request that the site itself or the user made. The site's
+    /// cookies are added, and the ones it sets are kept; the last value says
+    /// whether it set any.
+    pub async fn request(&self, request: Request) -> Result<(Head, Body, bool), Error> {
+        self.request_in(request, Context::SameSite).await
+    }
+
+    /// Send one request made in `context`, which decides the cookies added.
+    pub async fn request_in(&self, mut request: Request, context: Context) -> Result<(Head, Body, bool), Error> {
         let url = request.url.clone();
         // Cookies come from the jar and nowhere else.
         request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("cookie"));
-        if let Some(cookies) = self.jar.borrow().header_for(&url) {
+        if let Some(cookies) = self.jar.borrow().header_in(&url, context) {
             request.headers.push(("cookie".to_owned(), cookies));
         }
         let (head, body) = self.exchange(&url, request).await?;

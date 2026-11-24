@@ -97,7 +97,7 @@ Each tailnet site is shown on its own subdomain, such as
 | Page loading, cookies, WebSockets, streaming | Open `/test/mock.html`. It uses stand-in sites and needs no tailnet. |
 | The client: control server, relay, WireGuard, TCP, HTTP, TLS, WebSockets | Open `/test/client.html`. It asks Tailscale for a sign-in address and runs the rest between two throwaway devices, without signing in. |
 | The client against your tailnet | Open `/test/client-signin.html`, sign in, and connect to a device. |
-| Client code (29 tests) | `RUN_TESTS=1 client/build.sh` |
+| Client code (31 tests) | `RUN_TESTS=1 client/build.sh` |
 
 Add `?report` to the first two pages to have it send its result to the server log,
 which helps on a device with no way to read the screen closely.

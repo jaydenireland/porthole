@@ -70,7 +70,7 @@ devices, it passes a packet through a Tailscale relay, opens a TCP
 connection over WireGuard through it, and makes HTTP, HTTPS and WebSocket
 requests over that. None of this signs in.
 
-`RUN_TESTS=1 ./build.sh` also runs 29 tests on this machine. They cover the
+`RUN_TESTS=1 ./build.sh` also runs 31 tests on this machine. They cover the
 parts that need no browser: HTTP, TLS, cookies and WebSockets against a
 small server inside the test, and the challenge handling.
 
@@ -104,7 +104,7 @@ and applies `tailscale-rs.patch`. After changing files there, run
 | `src/site.rs` | requests and WebSockets to a site: connect or reuse a connection, add TLS, send, keep cookies. |
 | `src/http.rs` | HTTP requests over a connection that is kept for the next one, with the body read a piece at a time and gzip unpacked. |
 | `src/tls.rs` | TLS settings and certificate checking. |
-| `src/cookies.rs` | the cookie jar, with a browser's rules for scripts. |
+| `src/cookies.rs` | the cookie jar, with a browser's rules for scripts and for `SameSite`. |
 | `src/selftest.rs` | the checks the test page runs: `relayCheck()`, `pathCheck()`, `recoveryCheck()`, `siteCheck()`, `netmapCheck()`, `pairedClient()`. |
 | `src/timer.rs` | waiting, done in a worker so hidden tabs do not stall. |
 | `../web/app/client.js` | loads the client for the app and reports its progress as a state. |

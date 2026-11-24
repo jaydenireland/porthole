@@ -15,7 +15,9 @@ const { upstream: UPSTREAM, appOrigin: APP_ORIGIN } = TailnetCodec.fromSiteLocat
 
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 const NULL_BODY = new Set([101, 204, 205, 304]);
-const DROP_REQUEST_HEADERS = new Set(["host", "accept-encoding", "connection", "content-length"]);
+// "origin" names this subdomain or whoever sent the browser here; the request
+// goes out with the tailnet's name for them instead (see askedBy).
+const DROP_REQUEST_HEADERS = new Set(["host", "accept-encoding", "connection", "content-length", "origin"]);
 const DROP_RESPONSE_HEADERS = new Set([
   // The node already decoded the body (and removed Content-Length if it did).
   "content-encoding", "transfer-encoding", "connection", "keep-alive",
@@ -54,6 +56,36 @@ function toUpstream(localHref) {
   return u.origin === self.location.origin ? UPSTREAM + u.pathname + u.search : null;
 }
 
+// The origin of the page that caused a request, as a browser on the tailnet
+// would name it, or null when nothing says. The site uses it to refuse
+// requests another site forged, and the node to decide which cookies go.
+//
+// - This site's own pages: its tailnet origin.
+// - The app, which loads pages into its frame: the app's origin. The app
+//   knows whether the user or another site asked, and fills that in.
+// - Another tailnet site, seen here on its own subdomain: its tailnet origin.
+// - Any other website: its origin, unchanged.
+//
+// Only page loads can come from elsewhere; everything else is asked for by
+// a page this worker controls. A page load says who caused it in "Origin"
+// when it posts a form and in the referrer otherwise.
+function askedBy(req, nav) {
+  if (!nav) return UPSTREAM;
+  let origin = req.headers.get("origin");
+  if (!origin && req.referrer) {
+    try { origin = new URL(req.referrer).origin; } catch { /* not an address */ }
+  }
+  if (!origin || origin === "null") return null;
+  if (origin === self.location.origin) return UPSTREAM;
+  if (origin === APP_ORIGIN) return APP_ORIGIN;
+  try {
+    const u = new URL(origin);
+    const [label, ...rest] = u.host.split(".");
+    if (`${u.protocol}//${rest.join(".")}` === APP_ORIGIN) return TailnetCodec.decodeLabel(label) ?? origin;
+  } catch { /* not an address */ }
+  return origin;
+}
+
 self.addEventListener("fetch", (event) => {
   if (!UPSTREAM) return;  // not a site subdomain (e.g. the app's own origin)
   const url = new URL(event.request.url);
@@ -74,14 +106,18 @@ async function proxy(req) {
   const referer = toUpstream(req.referrer);
   if (referer) headers.push(["Referer", referer]);
 
+  const from = askedBy(req, nav);
+  // A page loaded into a tab of its own, not into a frame.
+  const topLevel = req.destination === "document";
+
   const isDocument = nav || DOCUMENT_DESTINATIONS.has(req.destination);
   let cur = new URL(toUpstream(req.url));
   for (let hop = 0; hop < 10; hop++) {
     const h = headers.slice();
-    if (method !== "GET" && method !== "HEAD") h.push(["Origin", UPSTREAM]);
+    if (method !== "GET" && method !== "HEAD") h.push(["Origin", from ?? "null"]);
     let res;
     try {
-      res = await nodeRequest({ url: cur.href, method, headers: h, body }, nav, isDocument);
+      res = await nodeRequest({ url: cur.href, method, headers: h, body, from, topLevel }, nav, isDocument);
     } catch (e) {
       return errorResponse(cur.href, e, nav);
     }
