@@ -74,8 +74,9 @@
   // --- Address --------------------------------------------------------------
   //
   // Only the page shown in the app's frame reports, not frames inside it.
-  // "push" and "replace" say what happened to this frame's history; "move"
-  // is a step through it or a change of the part after "#".
+  // "load" is this page arriving; "push" and "replace" say what happened to
+  // this frame's history; "move" is a step through it or a change of the
+  // part after "#".
   if (window.parent === window.top) {
     const tell = (how) => top.postMessage(
       { type: "tailnet-location", path: location.pathname + location.search + location.hash, how },
@@ -90,7 +91,7 @@
     }
     addEventListener("popstate", () => tell("move"));
     addEventListener("hashchange", () => tell("move"));
-    tell("replace");
+    tell("load");
 
     // The app took this page for a frame on another site's page and asked
     // for it without the user's cookies, when it is the app's own frame

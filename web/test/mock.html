@@ -415,6 +415,7 @@ async function run() {
   await bridge.go("http://other.ts.net:8080/frames");
   await wait;
   forged = seen.findLast((r) => r.url.endsWith("/landed?from=frame"));
+  check("a frame on another site's page does not change the address the app shows", navigated.at(-1) === "http://other.ts.net:8080/frames", navigated.at(-1));
   check("a frame on another site's page with the referrer hidden is not taken for the site's own", forged.from === "http://other.ts.net:8080" && forged.topLevel === false, [forged.from, forged.topLevel]);
 
   // A site's rules about frames are applied to frames on other sites' pages.

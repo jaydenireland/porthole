@@ -17,7 +17,8 @@ const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 const NULL_BODY = new Set([101, 204, 205, 304]);
 // "origin" names this subdomain or whoever sent the browser here; the request
 // goes out with the tailnet's name for them instead (see askedBy).
-const DROP_REQUEST_HEADERS = new Set(["host", "accept-encoding", "connection", "content-length", "origin"]);
+// "user-agent" is added once, below.
+const DROP_REQUEST_HEADERS = new Set(["host", "accept-encoding", "connection", "content-length", "origin", "user-agent"]);
 const DROP_RESPONSE_HEADERS = new Set([
   // The node already decoded the body (and removed Content-Length if it did).
   "content-encoding", "transfer-encoding", "connection", "keep-alive",

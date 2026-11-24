@@ -33,8 +33,8 @@ export async function removeAppWorker() {
 // cookies:     { get(url) => string, set(url, text) }: what document.cookie reads and writes
 // onNavigated: (tailnetUrl, how) => void. how is "load" after a page navigation
 //              got a final response (the address then has no "#" part), or what
-//              the page then reported: "replace" with its full address once
-//              loaded, and "push", "replace" or "move" when it changes its own
+//              the page then reported: "load" for a page reached by a link,
+//              "replace" with its full address once loaded, and "push", "replace" or "move" when it changes its own
 //              address without loading (history.pushState, a "#" link, back)
 // onTitle:     (title) => void, when the page in the frame gets or changes its
 //              title. A new page has none until it reports one.
@@ -45,6 +45,7 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
   const relays = new Map();  // site origin -> { el, upstreamOrigin, pages, ready, resolve, reject }
   let current = "";  // the address the frame's page last reported; "" while one loads
   let shown = null;  // the relay of the site in the frame
+  let announced = null;  // a page we reported as loading, until it reports itself
   let asked = null;  // { relay, from }: someone other than the user sent the frame to this site
   // Pages, and their workers, that are in a frame on another site's page:
   // the service worker's id for each -> that site's origin, or null. Entered
@@ -126,6 +127,14 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
       const req = data.req;
       const safe = req.method === "GET" || req.method === "HEAD";
       let recheck = false;
+      // Whether this is a page for our frame, whose address we show. Only a
+      // page we put there ourselves certainly is.
+      const ours = req.from === location.origin;
+      // A page asked for while our frame shows another site is a frame on
+      // that site's page: its address must never be shown as the page's.
+      const theirs = data.nav && !req.topLevel && !ours && shown !== relay;
+      // A page opened in a browser tab of its own is not in our frame either.
+      const tab = data.nav && req.topLevel === true && !ours;
       if (req.from === location.origin) {
         // We loaded this page into the frame, which is the tab as far as the
         // site is concerned: for the user, unless a page of another site asked.
@@ -163,8 +172,16 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
       if (r.headers.some(([k]) => k.toLowerCase() === "set-cookie")) cookiesChanged(relay);
       if (data.nav && !(r.status >= 300 && r.status < 400)) {
         if (asked?.relay === relay) asked = null;  // kept until here so a redirect on the way counts the same
-        current = "";
-        onNavigated?.(data.req.url, "load");
+        // Say where our frame now is. A page that runs our script says so
+        // itself, and it alone knows whether it is in our frame or in a
+        // frame on the page there, so leave that to it unless we put the
+        // page there. Other kinds of page (an image, a download) cannot say.
+        const html = r.headers.some(([k, v]) => k.toLowerCase() === "content-type" && /^text\/html\b/i.test(v));
+        if (!theirs && !tab && (ours || !html)) {
+          current = "";
+          announced = html ? data.req.url : null;
+          onNavigated?.(data.req.url, "load");
+        }
       }
       port.postMessage({ ok: true, res });
       streamBody(r, port);
@@ -291,6 +308,16 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
         if (url.origin !== relay.upstreamOrigin) return;
         current = url.href;
         shown = relay;
+        if (data.how === "load") {
+          // A new page in our frame. If we reported it when it was asked
+          // for, this only adds the "#" part.
+          const bare = url.href.split("#")[0];
+          const known = announced === bare;
+          announced = null;
+          if (!known) onNavigated?.(bare, "load");
+          if (known || url.href !== bare) onNavigated?.(url.href, "replace");
+          return;
+        }
         onNavigated?.(url.href, ["push", "replace", "move"].includes(data.how) ? data.how : "move");
       } else if (data.type === "tailnet-title") {
         onTitle?.(String(data.title ?? "").trim().slice(0, 300));
