@@ -145,7 +145,7 @@ async function fakeSites(req) {
       return reply(200, [
         ["Content-Type", "text/html; charset=utf-8"],
         ["X-Frame-Options", "DENY"],
-        ["Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"],
+        ["Content-Security-Policy", "frame-ancestors 'none'"],
         ["Content-Length", "999999"],
         ["Set-Cookie", "csrftoken=abc; Path=/"],
         ["Set-Cookie", "sid=secret; Path=/; HttpOnly"],
@@ -191,14 +191,24 @@ location.hash = "part";
     // page is framed first.
     case "/framed":
       return reply(200, [["Content-Type", "text/html"], ["X-Frame-Options", "DENY"],
-        ["Content-Security-Policy", "default-src 'self'; frame-ancestors 'self' http://*.ts.net:8080"]],
+        ["Content-Security-Policy", "frame-ancestors http://other.ts.net:8080"]],
         `<title>Framed</title><body><script>
 setTimeout(async () => {
   await fetch("/cookie-echo");
+  const worker = new Worker("/worker.js");
+  const workerDone = new Promise((r) => { worker.onmessage = r; worker.onerror = r; setTimeout(r, 3000); });
   const ws = new WebSocket("ws://" + location.host + "/echo");
-  ws.onopen = () => { ws.close(); top.postMessage({ t: "framed", cookie: document.cookie }, "*"); };
+  ws.onopen = async () => { ws.close(); await workerDone; top.postMessage({ t: "framed", cookie: document.cookie }, "*"); };
 }, 300);
 <\/script>`);
+    case "/worker.js": return reply(200, [["Content-Type", "text/javascript"]], `fetch("/cookie-echo?worker").then(() => postMessage("done"));`);
+    // A page with a policy on scripts: one named by a nonce, one from the
+    // site's real address, and one inline that the policy does not allow.
+    case "/csp":
+      return reply(200, [["Content-Type", "text/html"],
+        ["Content-Security-Policy", "default-src 'none'; script-src 'nonce-abc' http://fake.ts.net; frame-ancestors 'none'"]],
+        `<title>Policy</title><body><script>window.sneaked = true;<\/script><script src="/rel.js"><\/script>
+<script nonce="abc">top.postMessage({ t: "csp", sneaked: window.sneaked === true, relLoaded: window.relLoaded === true, ours: WebSocket.name }, "*");<\/script>`);
     // A link to the site's own page that hides the referrer.
     case "/quiet":
       return html(`<title>Quiet</title><body><a id="q" rel="noreferrer" href="/landed?from=quiet">go</a>
@@ -384,31 +394,39 @@ async function run() {
   check("a page reached through another site's redirect is marked as sent by that site",
     lastSeen("/hello").from === "http://fake.ts.net" && lastSeen("/hello").topLevel === true, [lastSeen("/hello").from, lastSeen("/hello").topLevel]);
 
+  let from;
   // 4a. Requests another site causes say so, so the site can refuse them and
   // the node can hold back SameSite cookies.
+  from = seen.length;
   wait = next((d) => d.t === "page" && d.title === "Posted", "page after a form posted by another site");
   await bridge.go("http://other.ts.net:8080/forge");
   await wait;
   let forged = lastSeen("/submit");
   check("a form posted by another site names that site in Origin, once", origins(forged) === "http://other.ts.net:8080", origins(forged));
   check("a form posted by another site is marked as such for cookies", forged.from === "http://other.ts.net:8080" && forged.topLevel === false, [forged.from, forged.topLevel]);
+  // Where the form led looked like a frame on the other site's page at first,
+  // and was asked for again once it turned out to be the app's own frame.
+  const landings = seen.slice(from).filter((r) => new URL(r.url).pathname === "/posted");
+  const asOurs = (r) => r?.from === "http://fake.ts.net" || r?.topLevel === true;
+  check("a page taken for another site's frame is asked for again once it is known to be ours",
+    landings.length === 2 && landings[0].from === "http://other.ts.net:8080" && !asOurs(landings[0]) && asOurs(landings[1]), landings.map((r) => [r.from, r.topLevel]));
 
   wait = next((d) => d.t === "page" && d.path === "/landed?from=frame", "the site in another site's frame");
   await bridge.go("http://other.ts.net:8080/frames");
   await wait;
   forged = seen.findLast((r) => r.url.endsWith("/landed?from=frame"));
-  check("a frame on another site's page with the referrer hidden is not taken for the site's own", forged.from === null && forged.topLevel === false, [forged.from, forged.topLevel]);
+  check("a frame on another site's page with the referrer hidden is not taken for the site's own", forged.from === "http://other.ts.net:8080" && forged.topLevel === false, [forged.from, forged.topLevel]);
 
   // A site's rules about frames are applied to frames on other sites' pages.
   let homes = 0;
   const countHomes = (ev) => { if (ev.data?.t === "home") homes++; };
   addEventListener("message", countHomes);
-  wait = next((d) => d.type === "tailnet-error", "a refused frame");
+  from = seen.length;
   await bridge.go("http://other.ts.net:8080/frames-refused");
-  const refusal = await wait;
-  await new Promise((r) => setTimeout(r, 1500));
+  await new Promise((r) => setTimeout(r, 2500));
   removeEventListener("message", countHomes);
-  check("a site that forbids frames is not shown in another site's frame", refusal.origin === SITE && refusal.message.includes("does not allow") && homes === 0, [refusal.message, homes]);
+  check("a site that forbids frames is not shown in another site's frame",
+    seen.slice(from).some((r) => r.url === "http://fake.ts.net/" && r.from === "http://other.ts.net:8080") && homes === 0, String(homes));
 
   wait = next((d) => d.t === "framed", "a page another site may frame");
   await bridge.go("http://other.ts.net:8080/frames-allowed");
@@ -418,6 +436,15 @@ async function run() {
     lastSeen("/cookie-echo").from === "http://other.ts.net:8080" && lastSeen("/cookie-echo").topLevel === false, [lastSeen("/cookie-echo").from, lastSeen("/cookie-echo").topLevel]);
   check("a framed page's sockets are marked the same way", sockets.at(-1).from === "http://other.ts.net:8080", String(sockets.at(-1).from));
   check("a framed page reads no cookies", inFrame.cookie === "", inFrame.cookie);
+  const byWorker = seen.findLast((r) => r.url.endsWith("/cookie-echo?worker"));
+  check("a framed page's worker is marked the same way", byWorker?.from === "http://other.ts.net:8080" && byWorker.topLevel === false, [byWorker?.from, byWorker?.topLevel]);
+
+  // The site's own policy on scripts still applies, and lets ours in.
+  wait = next((d) => d.t === "csp", "a page with a script policy");
+  await bridge.go("http://fake.ts.net/csp");
+  const policy = await wait;
+  check("a site's script policy is kept: its own scripts run, others do not", policy.relLoaded === true && policy.sneaked === false, policy);
+  check("our page script runs under a site's script policy", policy.ours === "TailnetWebSocket", policy.ours);
 
   wait = next((d) => d.t === "page" && d.path === "/landed?from=quiet", "page after a link with no referrer");
   await bridge.go("http://fake.ts.net/quiet");
@@ -427,7 +454,7 @@ async function run() {
 
   // 4b. A page that changes its own address without loading.
   wait = next((d) => d.t === "spa", "address changes");
-  let from = navigatedHow.length;
+  from = navigatedHow.length;
   await bridge.go("http://fake.ts.net/spa#start");
   await wait;
   await new Promise((r) => setTimeout(r, 100));

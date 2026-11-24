@@ -13,10 +13,10 @@ component.
 | `app/index.html` | the browser: sign-in, device list, address bar, frame. |
 | `app/bridge.js` | app side: one hidden relay frame per tailnet site; answers the service workers' requests with the Tailscale client. |
 | `assets/` | shared styles and the icon. |
-| `sw.js` | service worker that runs on each site's subdomain and serves its requests through the client. It must stay at the root. |
+| `sw.js` | service worker that runs on each site's subdomain and serves its requests through the client. It sends the site's `Content-Security-Policy` and framing rules on in the subdomain's terms. It must stay at the root. |
 | `__tailnet/codec.js` | maps a tailnet origin to a subdomain label and back. |
 | `__tailnet/relay.html` | hidden page on each site's subdomain; installs the worker there and passes its requests up to the app. |
-| `__tailnet/page.js` | added to every tailnet page by the worker; routes `WebSocket` and `document.cookie` through the client, and tells the app the page's title and its address when a script or a `#` link changes it; applies the site's own rules about frames (`X-Frame-Options`, `frame-ancestors`), which the worker has to drop. |
+| `__tailnet/page.js` | added to every tailnet page by the worker; routes `WebSocket` and `document.cookie` through the client, and tells the app the page's title and its address when a script or a `#` link changes it; says when another site's page shows it in a frame, so its requests go without that site's user's cookies. |
 | `app/client.js` | loads the Tailscale client and reports its progress to the app as a state. |
 | `client/` | the built client. Not in the repository; `../client/build.sh` writes it. |
 | `test/client/` | the same with logging and the test pages' checks. The app loads it when opened with `?debug`. |

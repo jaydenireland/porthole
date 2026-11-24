@@ -46,8 +46,9 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
   let current = "";  // the address the frame's page last reported; "" while one loads
   let shown = null;  // the relay of the site in the frame
   let asked = null;  // { relay, from }: someone other than the user sent the frame to this site
-  // Pages that said they are in a frame on another site's page (see page.js):
-  // the service worker's id for the page -> that site's origin, or null.
+  // Pages, and their workers, that are in a frame on another site's page:
+  // the service worker's id for each -> that site's origin, or null. Entered
+  // when such a page is asked for (see serve) and when one says so (page.js).
   const framed = new Map();
 
   // Only one tab browses at a time. A site's service worker is shared by
@@ -112,30 +113,53 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
     else frame.src = site + upstream.pathname + upstream.search + upstream.hash;
   }
 
+  function setFramed(client, by) {
+    if (framed.size >= 1000) framed.delete(framed.keys().next().value);
+    framed.set(client, by);
+  }
+
   async function serve(relay, data, port) {
     try {
       // A site may only reach its own tailnet origin; this is what keeps
       // sites isolated from each other.
       if (new URL(data.req.url).origin !== relay.upstreamOrigin) throw new Error("Blocked a request outside this site's own origin.");
       const req = data.req;
+      const safe = req.method === "GET" || req.method === "HEAD";
+      let recheck = false;
       if (req.from === location.origin) {
         // We loaded this page into the frame, which is the tab as far as the
         // site is concerned: for the user, unless a page of another site asked.
         req.from = asked?.relay === relay ? asked.from : relay.upstreamOrigin;
         req.topLevel = true;
-      } else if (data.nav && req.from == null && !req.topLevel && (req.method === "GET" || req.method === "HEAD") && shown === relay) {
-        // A page that hides its referrer followed one of its own links. A
-        // frame that another site's page put this site in does not get here:
-        // the site in our frame is then the other one.
-        req.from = relay.upstreamOrigin;
+      } else if (data.nav && !req.topLevel && shown === relay) {
+        // A page going into a frame while our frame shows this site: ours,
+        // moving on. If nothing says who asked, a page that hides its
+        // referrer followed one of its own links. If another site did, it
+        // sent our frame here, as a link in a tab would.
+        if (req.from == null) { if (safe) req.from = relay.upstreamOrigin; }
+        else if (req.from !== relay.upstreamOrigin) req.topLevel = true;
+      } else if (data.nav && !req.topLevel) {
+        // A page going into a frame while our frame shows another site: a
+        // frame on that site's page, whatever the request says of itself
+        // (a link followed inside such a frame names this site). It goes
+        // as that site's doing, and so does all the page then asks for.
+        // Our own frame arriving here by a route we cannot see, such as the
+        // browser's back button, looks the same; the page tells us if so
+        // (recheck, see page.js) and loads again.
+        if (req.from == null || req.from === relay.upstreamOrigin) req.from = shown ? shown.upstreamOrigin : null;
+        if (typeof data.next === "string" && data.next) setFramed(data.next, req.from);
+        recheck = safe;
       } else if (!data.nav && framed.has(data.client)) {
-        // Asked for by a page that another site's page shows in a frame.
+        // Asked for by a page that another site's page shows in a frame. A
+        // worker such a page starts is in the same position.
         req.from = framed.get(data.client);
         req.topLevel = false;
+        if (typeof data.next === "string" && data.next) setFramed(data.next, req.from);
       }
       const r = await request(req);
       const res = { status: r.status, statusText: r.statusText, url: r.url, headers: r.headers };
-      if (data.doc) res.cookies = cookies.get(data.req.url);
+      if (recheck) res.recheck = true;
+      else if (data.doc && !(!data.nav && framed.has(data.client))) res.cookies = cookies.get(data.req.url);
       if (r.headers.some(([k]) => k.toLowerCase() === "set-cookie")) cookiesChanged(relay);
       if (data.nav && !(r.status >= 300 && r.status < 400)) {
         if (asked?.relay === relay) asked = null;  // kept until here so a redirect on the way counts the same
@@ -252,8 +276,8 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
       else if (data.type === "tailnet-relay-failed") relay.reject(new Error(String(data.error)));
       else if (data.type === "tailnet-request" && ev.ports[0]) serve(relay, data, ev.ports[0]);
       else if (data.type === "tailnet-framed" && typeof data.client === "string") {
-        if (framed.size >= 1000) framed.delete(framed.keys().next().value);
-        framed.set(data.client, typeof data.by === "string" ? data.by : null);
+        if (data.clear) framed.delete(data.client);
+        else setFramed(data.client, typeof data.by === "string" ? data.by : null);
       }
     } else if (ev.source === frame.contentWindow) {
       // Sent by pages our service worker generates.
