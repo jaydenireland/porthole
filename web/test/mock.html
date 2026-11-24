@@ -16,6 +16,7 @@ const dec = (b) => new TextDecoder().decode(b ?? new Uint8Array());
 const seen = [];       // every request the fake sites received
 const sockets = [];    // every websocket the fake node was asked to open
 const navigated = [];  // every onNavigated callback
+const navigatedHow = [];  // the same, with how each one happened
 const errors = [];     // every onError callback
 let pausedRelease = null;
 let eventStreamCancelled = false;
@@ -158,6 +159,13 @@ async function fakeSites(req) {
     case "/bytes": return { status: 200, statusText: "", url: req.url, headers: [["Content-Type", "application/octet-stream"]], body: new Uint8Array([0, 255, 128, 7]) };
     case "/nocontent": return reply(204, []);
     case "/redirect": return reply(302, [["Location", "/landed?from=redirect"]]);
+    case "/spa":
+      return html(`<title>Spa</title><body><script>
+history.pushState(null, "", "/spa/one?x=1");
+history.replaceState(null, "", "/spa/two");
+addEventListener("hashchange", () => top.postMessage({ t: "spa" }, "*"));
+location.hash = "part";
+<\/script>`);
     case "/landed": return html(`<title>Landed</title><body>landed${REPORT}`);
     case "/submit": {
       const id = String(nextId++);
@@ -256,7 +264,7 @@ async function run() {
     websocket: fakeSocket,
     cookies: fakeCookies,
     onCookiesChanged: () => cookieChanges++,
-    onNavigated: (url) => navigated.push(url),
+    onNavigated: (url, how) => { navigated.push(url); navigatedHow.push(how + " " + url); },
     onError: (m) => errors.push(m),
     onSuperseded: () => supersededCount++,
   });
@@ -326,6 +334,29 @@ async function run() {
   check("cross-site redirect moves to the other subdomain", page.origin === OTHER && page.path === "/hello", page.href);
   check("other site reported to the app", navigated.at(-1) === "http://other.ts.net:8080/hello", navigated);
   check("each site only requested its own origin", seen.every((r) => ["http://fake.ts.net", "http://other.ts.net:8080"].includes(new URL(r.url).origin)));
+
+  // 4b. A page that changes its own address without loading.
+  wait = next((d) => d.t === "spa", "address changes");
+  let from = navigatedHow.length;
+  await bridge.go("http://fake.ts.net/spa#start");
+  await wait;
+  await new Promise((r) => setTimeout(r, 100));
+  const spa = navigatedHow.slice(from).join(", ");
+  check("address changes made by the page are reported, with the # part",
+    spa.startsWith(["load http://fake.ts.net/spa", "replace http://fake.ts.net/spa#start", "push http://fake.ts.net/spa/one?x=1",
+      "replace http://fake.ts.net/spa/two", "move http://fake.ts.net/spa/two#part"].join(", ")), spa);
+
+  // 4c. Going to the address the page is already on, # part included, reloads it.
+  wait = next((d) => d.t === "page" && d.title === "Landed", "landed page");
+  await bridge.go("http://fake.ts.net/landed#a");
+  await wait;
+  await new Promise((r) => setTimeout(r, 100));
+  check("a loaded page reports its # part", navigatedHow.at(-1) === "replace http://fake.ts.net/landed#a", navigatedHow.at(-1));
+  from = seen.length;
+  wait = next((d) => d.t === "page" && d.title === "Landed", "landed page again");
+  await bridge.go("http://fake.ts.net/landed#a");
+  await wait;
+  check("same address with a # part reloads", seen.slice(from).some((r) => new URL(r.url).pathname === "/landed"));
 
   // 5. Unreachable host shows an error page and tells the app.
   await bridge.go("http://down.ts.net/");

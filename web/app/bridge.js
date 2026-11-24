@@ -26,12 +26,17 @@ export async function removeAppWorker() {
 //              read() resolves to the next body chunk (Uint8Array) or null at the end.
 // websocket:   ({url, protocols, headers, onOpen, onMessage, onClose, onError}) => {send, close}
 // cookies:     { get(url) => string, set(url, text) }: what document.cookie reads and writes
-// onNavigated: (tailnetUrl) => void, after a page navigation got a final response
+// onNavigated: (tailnetUrl, how) => void. how is "load" after a page navigation
+//              got a final response (the address then has no "#" part), or what
+//              the page then reported: "replace" with its full address once
+//              loaded, and "push", "replace" or "move" when it changes its own
+//              address without loading (history.pushState, a "#" link, back)
 // onCookiesChanged: () => void, after a response or a page script changed a cookie
 // onError:     (message) => void
 // onSuperseded: () => void, when Porthole is opened in another tab and this one stops
 export function createBridge({ frame, request, websocket, cookies, onNavigated, onCookiesChanged, onError, onSuperseded }) {
   const relays = new Map();  // site origin -> { el, upstreamOrigin, pages, ready, resolve, reject }
+  let current = "";  // the address the frame's page last reported; "" while one loads
 
   // Only one tab browses at a time. A site's service worker is shared by
   // every tab and cannot tell which tab a request came from, so two active
@@ -85,7 +90,10 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
     const upstream = typeof input === "string" ? parseAddress(input) : input;
     const site = await relayFor(upstream);
     if (!active) throw new Error("Porthole is open in another tab.");
-    frame.src = site + upstream.pathname + upstream.search + upstream.hash;
+    // Setting the frame to the address it is already on, "#" part included,
+    // would not load anything, so ask the page to reload itself.
+    if (upstream.hash && upstream.href === current) frame.contentWindow.postMessage({ type: "tailnet-reload" }, site);
+    else frame.src = site + upstream.pathname + upstream.search + upstream.hash;
   }
 
   async function serve(relay, data, port) {
@@ -97,7 +105,7 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
       const res = { status: r.status, statusText: r.statusText, url: r.url, headers: r.headers };
       if (data.doc) res.cookies = cookies.get(data.req.url);
       if (r.headers.some(([k]) => k.toLowerCase() === "set-cookie")) cookiesChanged(relay);
-      if (data.nav && !(r.status >= 300 && r.status < 400)) onNavigated?.(data.req.url);
+      if (data.nav && !(r.status >= 300 && r.status < 400)) { current = ""; onNavigated?.(data.req.url, "load"); }
       port.postMessage({ ok: true, res });
       streamBody(r, port);
     } catch (e) {
@@ -209,6 +217,15 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
       // Sent by pages our service worker generates.
       if (data.type === "tailnet-navigate") go(String(data.url)).catch((e) => onError?.(String(e?.message ?? e)));
       else if (data.type === "tailnet-error") onError?.(`${data.url}: ${data.message}`);
+      else if (data.type === "tailnet-location") {
+        // Sent by __tailnet/page.js. It only names a path; the origin is
+        // fixed by which site the page is on.
+        let url;
+        try { url = new URL(String(data.path), relay.upstreamOrigin); } catch { return; }
+        if (url.origin !== relay.upstreamOrigin) return;
+        current = url.href;
+        onNavigated?.(url.href, ["push", "replace", "move"].includes(data.how) ? data.how : "move");
+      }
     }
   });
 

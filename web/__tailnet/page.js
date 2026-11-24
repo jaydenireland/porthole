@@ -1,12 +1,15 @@
 // Injected at the top of every tailnet page by the service worker. It covers
-// the two things a service worker cannot do for a page:
+// the things a service worker cannot do for a page:
 //
 // - WebSocket: replaced with a class that tunnels through the app's tailnet
 //   node. Sockets opened inside Web Workers are not covered.
 // - document.cookie: the site's cookies live in the node, not in the browser,
 //   so reads and writes are redirected there.
 //
-// Both talk to the app page (our top window) over MessagePorts.
+// - The address: the app cannot read this frame's location, so the page
+//   reports it on load and whenever a script or a "#" link changes it.
+//
+// All of them talk to the app page (our top window).
 // Needs codec.js loaded first.
 (() => {
   const info = globalThis.TailnetCodec?.fromSiteLocation(location);
@@ -15,6 +18,33 @@
   delete globalThis.__tailnetCookies;
   if (!info?.upstream || !Native || window.top === window) return;
   const upstream = new URL(info.upstream);
+
+  // --- Address --------------------------------------------------------------
+  //
+  // Only the page shown in the app's frame reports, not frames inside it.
+  // "push" and "replace" say what happened to this frame's history; "move"
+  // is a step through it or a change of the part after "#".
+  if (window.parent === window.top) {
+    const tell = (how) => top.postMessage(
+      { type: "tailnet-location", path: location.pathname + location.search + location.hash, how },
+      info.appOrigin);
+    for (const [name, how] of [["pushState", "push"], ["replaceState", "replace"]]) {
+      const native = History.prototype[name];
+      History.prototype[name] = function (...args) {
+        const result = native.apply(this, args);
+        if (this === history) tell(how);
+        return result;
+      };
+    }
+    addEventListener("popstate", () => tell("move"));
+    addEventListener("hashchange", () => tell("move"));
+    tell("replace");
+    // The app reloads through us when setting the frame's address would only
+    // scroll to the same "#" part.
+    addEventListener("message", (ev) => {
+      if (ev.source === top && ev.origin === info.appOrigin && ev.data?.type === "tailnet-reload") location.reload();
+    });
+  }
 
   // --- document.cookie ------------------------------------------------------
   //

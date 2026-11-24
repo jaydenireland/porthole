@@ -448,7 +448,8 @@ const hashTarget = () => {
 let pendingTarget = hashTarget();  // opened once the tab is connected
 
 function rememberAddress(url) {
-  history.replaceState(null, "", url ? "#" + url : location.pathname + location.search);
+  // Safari refuses more than 100 of these in 30 seconds.
+  try { history.replaceState(null, "", url ? "#" + url : location.pathname + location.search); } catch {}
   let host = "";
   try { host = new URL(url).host; } catch {}
   document.title = host ? host + " | Porthole" : "Porthole";
@@ -554,8 +555,9 @@ $("filter").addEventListener("input", renderPeers);
 // --- Browsing ---------------------------------------------------------------
 
 // The frame is on another origin, so we cannot read its address or history.
-// The bridge tells us about every page navigation instead, and we keep our
-// own back/forward list of tailnet addresses.
+// The bridge tells us about every page load, and about every change a page
+// makes to its own address without loading, and we keep our own back/forward
+// list of tailnet addresses.
 const visited = [];
 let index = -1;
 
@@ -635,11 +637,18 @@ const bridge = parked ? null : createBridge({
     get: (url) => (running ? ipn.cookies(url) : ""),
     set: (url, text) => { if (running) ipn.setCookie(url, text); },
   },
-  onNavigated: (url) => {
+  onNavigated: (url, how) => {
+    // A load is reported without its "#" part; the page adds it once it runs.
+    if (how === "load" && visited[index]?.split("#")[0] === url) url = visited[index];
     if (url !== visited[index]) {
-      visited.splice(index + 1);
-      visited.push(url);
-      index = visited.length - 1;
+      if (how === "replace" && index >= 0) visited[index] = url;
+      else if (how === "move" && url === visited[index - 1]) index--;
+      else if (how === "move" && url === visited[index + 1]) index++;
+      else {
+        visited.splice(index + 1);
+        visited.push(url);
+        index = visited.length - 1;
+      }
     }
     showAddress(url);
     setLoading(false);
