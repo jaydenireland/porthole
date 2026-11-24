@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terms, privacy and licences | Porthole</title>
+<meta name="description" content="The terms Porthole is offered on, what data it handles, and the licences of the software it is built from.">
+<link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/theme.css">
+<style>
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 24px; }
+  h1, h2 { font-family: var(--serif); font-weight: 600; margin: 0; }
+  h1 { font-size: clamp(32px, 4.6vw, 46px); line-height: 1.1; }
+  h2 { font-size: 26px; line-height: 1.2; margin-top: 56px; }
+  .top { border-bottom: 1px solid var(--border); }
+  .top .wrap { display: flex; align-items: center; gap: 20px; height: 62px; max-width: 960px; }
+  .top .btn { margin-left: auto; }
+  .intro { padding: 56px 0 8px; }
+  .intro p { margin-top: 16px; color: var(--muted); font-size: 18px; }
+  main p, main li { margin-top: 12px; }
+  main ul { padding-left: 20px; }
+  .note { color: var(--muted); }
+  footer { border-top: 1px solid var(--border); margin-top: 72px; padding: 28px 0 44px; color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="/">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14" fill="var(--brass)"/><circle cx="16" cy="16" r="10" fill="var(--glass)"/><path d="M6.6 18.5c3.1-2.4 6.3-2.4 9.4 0s6.3 2.4 9.4 0A10 10 0 0 1 6.6 18.5z" fill="#62cfd6"/></svg>
+      Porthole
+    </a>
+    <a class="btn primary" href="/app/">Open Porthole</a>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="intro">
+    <h1>Terms, privacy and licences</h1>
+    <p>Porthole is free, open-source software, published by Jayden Ireland as a personal project. This page says what you can expect from it and what it does with data.</p>
+    <p class="note">Last updated in November 2026.</p>
+  </div>
+
+  <h2 id="terms">Terms of use</h2>
+  <p>Porthole is provided as it is, without a warranty of any kind and without a promise that it will stay available or keep working. It is experimental: it is built on a preview release of Tailscale's Rust libraries and has had no independent security review. To the extent the law allows, the author is not liable for loss or damage that comes from using it. The software's licence, linked below, says the same in full.</p>
+  <ul>
+    <li>Use it only with a tailnet you are allowed to use, and follow the rules of whoever runs that tailnet.</li>
+    <li>You connect with your own Tailscale account. Your use of Tailscale's service, through Porthole as through any device, is under <a href="https://tailscale.com/terms" rel="noopener">Tailscale's own terms</a>.</li>
+    <li>Porthole does not check tailnet lock signatures. If your tailnet depends on tailnet lock, do not use Porthole with it.</li>
+    <li>While a Porthole tab is open, the scripts this site serves can reach whatever your account can reach on your tailnet. If you would rather not trust this copy, <a href="https://github.com/jaydenireland/porthole#host-your-own-copy" rel="noopener">host your own</a>.</li>
+  </ul>
+
+  <h2 id="affiliation">Not a Tailscale product</h2>
+  <p>Porthole is an independent project. It is not made, endorsed or supported by Tailscale Inc., so please do not send Tailscale support requests about it. Tailscale is a registered trademark of Tailscale Inc. and is used here only to say what Porthole works with.</p>
+
+  <h2 id="privacy">Privacy</h2>
+  <p>Porthole has no accounts, no analytics and no advertising, and sets no tracking cookies.</p>
+  <ul>
+    <li><b>Your tailnet's pages.</b> They travel encrypted between the tab and your devices, through Tailscale's relays. They do not pass through this site's host, and we cannot see them.</li>
+    <li><b>What the site's host sees.</b> The files are served by Cloudflare. As with any website, Cloudflare receives your IP address and browser details when the files are fetched. Each tailnet site is shown on its own address under this domain, and that address contains the site's name (for example your device's and tailnet's names), so those names are visible to Cloudflare and to your DNS provider when the address is first opened. The paths and contents of the pages are not.</li>
+    <li><b>What Tailscale sees.</b> The same as for any device you add: the tab registers with Tailscale's coordination server and sends its encrypted traffic through Tailscale's relays. <a href="https://tailscale.com/privacy" rel="noopener">Tailscale's privacy policy</a> covers that.</li>
+    <li><b>What is kept in your browser.</b> The tab's device keys and your logins to tailnet sites are kept in the browser's storage for the session, or until you disconnect if you tick "Stay signed in on this browser". Nothing is copied anywhere else. This storage is needed for Porthole to work and is not used to track you.</li>
+    <li><b>Test pages.</b> If you open a test page with <span class="mono">?report</span> added, it sends its result and your browser's version to this site's log. Nothing is sent otherwise.</li>
+  </ul>
+  <p>Questions about privacy, or a request about data relating to you, can be raised through the <a href="https://github.com/jaydenireland/porthole" rel="noopener">project's page on GitHub</a>.</p>
+
+  <h2 id="licences">Licences</h2>
+  <p>Porthole's own code is under the <a href="https://github.com/jaydenireland/porthole/blob/main/LICENSE" rel="noopener">BSD 3-Clause licence</a>, and its source is on <a href="https://github.com/jaydenireland/porthole" rel="noopener">GitHub</a>.</p>
+  <p>The client that runs in the tab is compiled from Tailscale's <a href="https://github.com/tailscale/tailscale-rs" rel="noopener">tailscale-rs</a> (copyright Tailscale Inc &amp; contributors, BSD 3-Clause, with changes of ours) and other open-source libraries. Their copyright notices and licence texts are in <a href="/client/THIRD-PARTY-LICENSES.txt">the third-party licences file</a>.</p>
+</main>
+
+<footer>
+  <div class="wrap">Porthole is an independent project and is not affiliated with or endorsed by Tailscale Inc. Tailscale is a registered trademark of Tailscale Inc.</div>
+</footer>
+
+</body>
+</html>

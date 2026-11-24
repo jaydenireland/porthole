@@ -117,6 +117,7 @@ and applies `tailscale-rs.patch`. After changing files there, run
 | `src/local.rs` | lets single-threaded browser values satisfy the libraries' `Send` bounds. |
 | `src/error.rs` | the errors the page can be shown. |
 | `tailscale-rs.patch` | our changes to tailscale-rs. |
+| `make-notices.py` | writes the third-party licence notices that are published with the client. `build.sh` runs it. |
 
 ## What we use and what we wrote
 

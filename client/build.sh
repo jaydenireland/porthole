@@ -8,7 +8,7 @@
 #   RUN_TESTS=1 ./build.sh     also run the tests first
 #
 # Needs:
-# - git;
+# - git and Python 3;
 # - Rust with the wasm32-unknown-unknown target
 #   (rustup target add wasm32-unknown-unknown);
 # - wasm-bindgen's command-line tool at the version in Cargo.lock; the script
@@ -109,5 +109,9 @@ bundle() {  # bundle <out dir> [cargo arguments]
 
 bundle "$HERE/../web/client"
 bundle "$HERE/../web/test/client" --features console-log,diagnostics
+
+# The licences require their notices to go out with the compiled client, so
+# the list is rebuilt from Cargo.lock on every build and published beside it.
+"$HERE/make-notices.py" "$HERE/../web/client/THIRD-PARTY-LICENSES.txt"
 
 ls -l "$HERE/../web/client" "$HERE/../web/test/client"

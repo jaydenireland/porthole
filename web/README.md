@@ -21,6 +21,7 @@ component.
 | `client/` | the built client. Not in the repository; `../client/build.sh` writes it. |
 | `test/client/` | the same with logging and the test pages' checks. The app loads it when opened with `?debug`. |
 | `compatibility/index.html` | the supported browsers and devices page. |
+| `legal/index.html` | terms of use, privacy notes and licences. |
 | `test/client.html` | tests the client in the current browser without signing in: a sign-in address from Tailscale, then requests between two throwaway devices. |
 | `test/client-signin.html` | signs in to your tailnet and connects to a device you pick. |
 | `test/sockets.html` | opens each connection the client needs and says which ones fail. |

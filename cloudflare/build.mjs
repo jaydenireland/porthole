@@ -38,7 +38,7 @@ fs.writeFileSync(path.join(dist, "404.html"), `<!doctype html>
 `);
 
 // The client is built separately (../client/build.sh) and is not in git.
-for (const file of ["client/porthole_client.js", "client/porthole_client_bg.wasm"]) {
+for (const file of ["client/porthole_client.js", "client/porthole_client_bg.wasm", "client/THIRD-PARTY-LICENSES.txt"]) {
   if (!fs.existsSync(path.join(dist, file))) {
     console.error(`web/${file} is missing. Run client/build.sh first.`);
     process.exit(1);

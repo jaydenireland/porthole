@@ -53,7 +53,8 @@ are on. If you would rather not, host your own copy (below).
 - Tailscale sees what it sees for any device: the client talks to its
   coordination servers and relays. The relays cannot read the traffic.
 - The published site keeps no logs of tailnet traffic, because none reaches
-  it. Its one Worker only records results the test pages send.
+  it. Its host (Cloudflare) does see the names of the tailnet sites you open,
+  because each is shown on a subdomain that contains the name. Its one Worker only records results the test pages send.
 
 To report a security problem, please contact the maintainer privately before
 opening a public issue.
@@ -139,4 +140,9 @@ copyright Tailscale Inc & contributors, also under the BSD 3-Clause license.
 `client/tailscale-rs.patch` is a change to that code. The other libraries the
 client uses are listed in `client/README.md` and pinned in `client/Cargo.lock`.
 
-Tailscale is a trademark of Tailscale Inc.
+The published site carries every library's copyright notice and licence text
+in `/client/THIRD-PARTY-LICENSES.txt`, which `client/build.sh` regenerates from
+`Cargo.lock` on each build (`client/make-notices.py`). If you host your own
+copy, publish that file with it: the licences require it.
+
+Tailscale is a registered trademark of Tailscale Inc.
