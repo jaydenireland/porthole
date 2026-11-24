@@ -115,6 +115,14 @@ try {
   expect("cookie from a script", paired.cookies(site) === "seen=1; theme=dark", paired.cookies(site));
   const second = await fetchText({ url: site, method: "POST", body: new TextEncoder().encode("x") });
   expect("cookie sent back", second.text === "hello again", second.text);
+  // The cookie does not say SameSite, so it is kept back from what another
+  // site causes, except a page that site sends the tab to.
+  const forged = await fetchText({ url: site, method: "POST", body: new TextEncoder().encode("x"), from: "http://elsewhere.test", topLevel: true });
+  expect("cookie kept back from another site's POST", forged.text === "hello", forged.text);
+  const unknown = await fetchText({ url: site, from: null, topLevel: false });
+  expect("cookie kept back from a frame of unknown origin", unknown.text === "hello", unknown.text);
+  const linked = await fetchText({ url: site, from: "http://elsewhere.test", topLevel: true });
+  expect("cookie sent when another site links to the page", linked.text === "hello again", linked.text);
   stage("api requests");
   const jar = JSON.parse(paired.exportCookies());
   expect("exported cookies", jar.length === 2 && jar.every((c) => c.session === true && c.line && c.url), jar);
