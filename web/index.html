@@ -15,7 +15,6 @@
   h1 { font-size: clamp(36px, 5.600vw, 58px); line-height: 1.060; letter-spacing: -.01em; }
   h2 { font-size: clamp(27px, 3.400vw, 36px); line-height: 1.150; }
   h3 { font-size: 20px; line-height: 1.300; }
-  .eyebrow { font: 600 13px/1 var(--sans); letter-spacing: .09em; text-transform: uppercase; color: var(--brass); margin-bottom: 14px; }
   .lede { font-size: 19px; color: var(--muted); max-width: 58ch; }
   .section-head { max-width: 720px; margin-bottom: 40px; }
   .section-head p { margin-top: 14px; color: var(--muted); font-size: 17.500px; }
@@ -42,18 +41,26 @@
   }
 
   /* Steps */
-  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; counter-reset: step; list-style: none; margin: 0; padding: 0; }
-  .steps li { counter-increment: step; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 26px; }
-  .steps li::before {
-    content: counter(step); display: grid; place-items: center; width: 34px; height: 34px; margin-bottom: 18px;
-    border-radius: 50%; border: 2px solid var(--brass); color: var(--brass); font: 600 16px/1 var(--serif);
+  .steps { counter-reset: step; list-style: none; margin: 0; padding: 0; }
+  .steps li {
+    counter-increment: step; display: grid; grid-template-columns: 56px minmax(0, 260px) minmax(0, 1fr); gap: 6px 32px;
+    align-items: baseline; padding: 24px 0; border-top: 1px solid var(--border);
   }
-  .steps p { margin-top: 8px; color: var(--muted); }
-  @media (max-width: 860px) { .steps { grid-template-columns: 1fr; } }
+  .steps li::before { content: counter(step, decimal-leading-zero); color: var(--brass); font: 600 15px/1 var(--mono); }
+  .steps p { color: var(--muted); max-width: 62ch; }
+  @media (max-width: 860px) {
+    .steps li { grid-template-columns: 40px minmax(0, 1fr); column-gap: 12px; }
+    .steps p { grid-column: 2; }
+  }
 
   /* Fit */
-  .fit { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-  .fit > div { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 28px; }
+  .fit { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--border); }
+  .fit > div { padding: 28px 40px 0 0; }
+  .fit > div + div { padding: 28px 0 0 40px; border-left: 1px solid var(--border); }
+  @media (max-width: 860px) {
+    .fit > div { padding-right: 0; }
+    .fit > div + div { padding: 28px 0 0; margin-top: 28px; border-left: 0; border-top: 1px solid var(--border); }
+  }
   .fit ul { list-style: none; margin: 18px 0 0; padding: 0; display: grid; gap: 14px; }
   .fit li { display: grid; grid-template-columns: 22px 1fr; gap: 10px; }
   .fit li svg { width: 20px; height: 20px; margin-top: 3px; }
@@ -62,13 +69,31 @@
   @media (max-width: 860px) { .fit { grid-template-columns: 1fr; } }
 
   /* Privacy */
-  .path { display: flex; align-items: stretch; gap: 0; margin-bottom: 36px; flex-wrap: wrap; }
-  .path .node { flex: 1 1 180px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
+  /* One encrypted line from the tab to the devices; the relay is a hollow stop on it. */
+  .path { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr); column-gap: 20px; margin-bottom: 52px; }
+  .path::before { content: ""; position: absolute; left: 0; right: 0; top: 8px; height: 2px; background: var(--accent); }
+  .path .node { position: relative; padding-top: 36px; }
+  .path .node::before { content: ""; position: absolute; z-index: 1; top: 2px; left: 0; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); }
+  .path .node.relay { text-align: center; }
+  .path .node.relay::before { top: 0; left: calc(50% - 9px); width: 18px; height: 18px; background: var(--bg); border: 2px solid var(--accent); }
+  .path .node:last-child { text-align: right; }
+  .path .node:last-child::before { left: auto; right: 0; }
   .path .node b { display: block; }
-  .path .node span { color: var(--muted); font-size: 14.500px; }
-  .path .link { flex: 0 0 74px; display: grid; place-items: center; color: var(--accent); font: 600 11px/1.200 var(--sans); letter-spacing: .06em; text-transform: uppercase; text-align: center; }
-  .path .link::before { content: ""; display: block; width: 100%; border-top: 2px dashed var(--accent); margin-bottom: 6px; }
-  @media (max-width: 760px) { .path { flex-direction: column; } .path .link { flex-basis: 44px; } .path .link::before { width: 0; height: 18px; border-top: 0; border-left: 2px dashed var(--accent); margin: 0 auto 4px; } }
+  .path .node span { display: inline-block; max-width: 28ch; color: var(--muted); font-size: 14.500px; }
+  .path .link { position: relative; align-self: start; display: inline-flex; align-items: center; gap: 6px; height: 18px; padding: 0 10px; background: var(--bg); color: var(--accent); font: 600 12.500px/18px var(--sans); }
+  .path .link svg { width: 12px; height: 12px; flex: none; }
+  @media (max-width: 760px) {
+    .path { display: block; }
+    .path::before { display: none; }
+    .path .node, .path .node.relay, .path .node:last-child { padding: 0 0 0 34px; text-align: left; }
+    .path .node::before, .path .node:last-child::before { top: 5px; left: 2px; right: auto; }
+    .path .node.relay::before { top: 3px; left: 0; }
+    .path .node::after, .path .link::after { content: ""; position: absolute; left: 8px; top: 0; bottom: 0; width: 2px; background: var(--accent); }
+    .path .node:first-child::after { top: 12px; }
+    .path .node:last-child::after { bottom: auto; height: 12px; }
+    .path .node span { max-width: none; }
+    .path .link { display: flex; height: auto; padding: 12px 0 12px 34px; background: none; }
+  }
   .facts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 28px 44px; }
   .facts p { margin-top: 6px; color: var(--muted); }
   @media (max-width: 760px) { .facts { grid-template-columns: 1fr; } }
@@ -114,7 +139,6 @@
 <div class="hero">
   <div class="wrap">
     <div>
-      <p class="eyebrow">For Tailscale networks</p>
       <h1>Your tailnet, from any browser tab.</h1>
       <p class="lede">Porthole turns a browser tab into a temporary device on your Tailscale network. Open your private dashboards and admin pages on a computer where you can't install Tailscale, with nothing to set up and no server in between.</p>
       <div class="cta">
@@ -143,18 +167,18 @@
       <g clip-path="url(#glass)">
         <rect x="50" y="50" width="300" height="300" fill="url(#sea)"/>
         <!-- a small dashboard seen through the glass -->
-        <rect x="92" y="112" width="216" height="176" rx="12" fill="#f6f4ee"/>
-        <rect x="92" y="112" width="216" height="26" rx="12" fill="#dcd7ca"/>
-        <rect x="92" y="126" width="216" height="12" fill="#dcd7ca"/>
+        <rect x="92" y="112" width="216" height="176" rx="12" fill="#eef1f3"/>
+        <rect x="92" y="112" width="216" height="26" rx="12" fill="#cfd6dc"/>
+        <rect x="92" y="126" width="216" height="12" fill="#cfd6dc"/>
         <circle cx="108" cy="125" r="4" fill="#a9772a"/><circle cx="122" cy="125" r="4" fill="#0c6b7a"/>
-        <rect x="140" y="120" width="120" height="10" rx="5" fill="#f6f4ee"/>
-        <rect x="106" y="152" width="88" height="56" rx="7" fill="#fff" stroke="#dcd7ca"/>
+        <rect x="140" y="120" width="120" height="10" rx="5" fill="#eef1f3"/>
+        <rect x="106" y="152" width="88" height="56" rx="7" fill="#fff" stroke="#cfd6dc"/>
         <rect x="114" y="160" width="34" height="6" rx="3" fill="#95a1b2"/>
         <rect x="114" y="174" width="52" height="16" rx="4" fill="#0c6b7a"/>
-        <rect x="206" y="152" width="88" height="56" rx="7" fill="#fff" stroke="#dcd7ca"/>
+        <rect x="206" y="152" width="88" height="56" rx="7" fill="#fff" stroke="#cfd6dc"/>
         <rect x="214" y="160" width="34" height="6" rx="3" fill="#95a1b2"/>
         <rect x="214" y="174" width="40" height="16" rx="4" fill="#a9772a"/>
-        <rect x="106" y="218" width="188" height="58" rx="7" fill="#fff" stroke="#dcd7ca"/>
+        <rect x="106" y="218" width="188" height="58" rx="7" fill="#fff" stroke="#cfd6dc"/>
         <g fill="#0c6b7a"><rect x="120" y="250" width="14" height="18" rx="2"/><rect x="142" y="240" width="14" height="28" rx="2"/><rect x="164" y="246" width="14" height="22" rx="2"/><rect x="186" y="232" width="14" height="36" rx="2"/><rect x="208" y="242" width="14" height="26" rx="2"/><rect x="230" y="228" width="14" height="40" rx="2"/><rect x="252" y="236" width="14" height="32" rx="2"/></g>
         <!-- reflection on the glass -->
         <path d="M70 150 Q110 70 200 62" fill="none" stroke="#fff" stroke-width="10" stroke-linecap="round" opacity=".16"/>
@@ -167,8 +191,7 @@
 <section id="how">
   <div class="wrap">
     <div class="section-head">
-      <p class="eyebrow">How it works</p>
-      <h2>Three steps, and the first two take a minute.</h2>
+      <h2>How it works</h2>
     </div>
     <ol class="steps">
       <li>
@@ -190,8 +213,7 @@
 <section id="fit">
   <div class="wrap">
     <div class="section-head">
-      <p class="eyebrow">What it's for</p>
-      <h2>Made for the web pages on your tailnet.</h2>
+      <h2>What it's for</h2>
       <p>Porthole shows each site on an address of its own instead of its real one. Many self-hosted apps run fine that way, and a few features can't.</p>
     </div>
     <div class="fit">
@@ -220,16 +242,15 @@
 <section id="privacy">
   <div class="wrap">
     <div class="section-head">
-      <p class="eyebrow">Privacy and security</p>
-      <h2>Nothing of ours sits between you and your devices.</h2>
+      <h2>Privacy and security</h2>
       <p>Porthole is a set of files your browser downloads. After that, the connection is between the tab and your tailnet.</p>
     </div>
 
     <div class="path" aria-label="How traffic travels">
       <div class="node"><b>This browser tab</b><span>Runs the Tailscale client and holds its keys</span></div>
-      <div class="link">Encrypted</div>
-      <div class="node"><b>Tailscale's relays</b><span>Pass the traffic along without being able to read it</span></div>
-      <div class="link">Encrypted</div>
+      <div class="link"><svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M3.5 5V3.500a2.500 2.500 0 0 1 5 0V5H9a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm1.300 0h2.400V3.500a1.200 1.200 0 0 0-2.400 0z"/></svg>Encrypted</div>
+      <div class="node relay"><b>Tailscale's relays</b><span>Pass the traffic along without being able to read it</span></div>
+      <div class="link"><svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M3.5 5V3.500a2.500 2.500 0 0 1 5 0V5H9a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm1.300 0h2.400V3.500a1.200 1.200 0 0 0-2.400 0z"/></svg>Encrypted</div>
       <div class="node"><b>Your devices</b><span>See an ordinary device on your tailnet</span></div>
     </div>
 
@@ -250,8 +271,7 @@
 <section id="faq">
   <div class="wrap">
     <div class="section-head">
-      <p class="eyebrow">Questions</p>
-      <h2>Good to know before you start.</h2>
+      <h2>Questions</h2>
     </div>
     <div class="faq">
       <details>
@@ -296,8 +316,8 @@
 
 <section class="closing">
   <div class="wrap">
-    <h2>Take a look at your tailnet.</h2>
-    <p>Open Porthole, sign in with Tailscale, and your devices are a click away.</p>
+    <h2>Open your tailnet in this tab.</h2>
+    <p>You need a Tailscale account and a current browser.</p>
     <a class="btn primary large" href="/app/">Open Porthole</a>
   </div>
 </section>

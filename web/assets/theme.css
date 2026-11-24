@@ -1,11 +1,11 @@
 /* Shared look for the Porthole landing page and app. */
 :root {
-  --bg: #f6f4ee;
+  --bg: #fffcfb;
   --surface: #ffffff;
-  --surface-2: #efece3;
+  --surface-2: #e3e8ec;
   --text: #161b22;
   --muted: #5b6470;
-  --border: #dcd7ca;
+  --border: #cfd6dc;
   --accent: #0c6b7a;
   --accent-hover: #095865;
   --accent-ink: #ffffff;
