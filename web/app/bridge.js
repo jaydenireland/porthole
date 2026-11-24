@@ -158,6 +158,14 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
         if (req.from == null || req.from === relay.upstreamOrigin) req.from = shown ? shown.upstreamOrigin : null;
         if (typeof data.next === "string" && data.next) setFramed(data.next, req.from);
         recheck = safe;
+      } else if (!data.nav && data.blank && shown !== relay && typeof data.client === "string" && !framed.has(data.client)) {
+        // Asked for by a blank frame (about:blank or srcdoc content) that a
+        // page of this site made, while our frame shows another site: the
+        // page is in a frame on that site's page, and its blank frames with
+        // it. They run none of our script, so they cannot say so themselves.
+        req.from = shown ? shown.upstreamOrigin : null;
+        req.topLevel = false;
+        setFramed(data.client, req.from);
       } else if (!data.nav && framed.has(data.client)) {
         // Asked for by a page that another site's page shows in a frame. A
         // worker such a page starts is in the same position.

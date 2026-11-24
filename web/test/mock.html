@@ -195,6 +195,15 @@ location.hash = "part";
         `<title>Framed</title><body><script>
 setTimeout(async () => {
   await fetch("/cookie-echo");
+  // Frames the page makes without loading anything into them.
+  const blank = document.createElement("iframe");
+  document.body.append(blank);
+  await blank.contentWindow.fetch("/cookie-echo?blank");
+  const written = document.createElement("iframe");
+  written.srcdoc = "<script>fetch('/cookie-echo?srcdoc').then(() => parent.postMessage('srcdoc', '*'));<" + "/script>";
+  const writtenDone = new Promise((r) => { addEventListener("message", (e) => { if (e.data === "srcdoc") r(); }); setTimeout(r, 3000); });
+  document.body.append(written);
+  await writtenDone;
   const worker = new Worker("/worker.js");
   const workerDone = new Promise((r) => { worker.onmessage = r; worker.onerror = r; setTimeout(r, 3000); });
   const ws = new WebSocket("ws://" + location.host + "/echo");
@@ -439,6 +448,14 @@ async function run() {
   check("a framed page reads no cookies", inFrame.cookie === "", inFrame.cookie);
   const byWorker = seen.findLast((r) => r.url.endsWith("/cookie-echo?worker"));
   check("a framed page's worker is marked the same way", byWorker?.from === "http://other.ts.net:8080" && byWorker.topLevel === false, [byWorker?.from, byWorker?.topLevel]);
+
+  const bySrcdoc = seen.findLast((r) => r.url.endsWith("/cookie-echo?srcdoc"));
+  check("a framed page's srcdoc frame is marked the same way", bySrcdoc?.from === "http://other.ts.net:8080" && bySrcdoc.topLevel === false, [bySrcdoc?.from, bySrcdoc?.topLevel]);
+  // Chromium does not pass an empty frame's requests to the service worker,
+  // so there they never reach the node at all.
+  const byBlank = seen.findLast((r) => r.url.endsWith("/cookie-echo?blank"));
+  check("a framed page's empty frame is marked the same way, if its requests reach the node at all",
+    !byBlank || (byBlank.from === "http://other.ts.net:8080" && byBlank.topLevel === false), [byBlank?.from, byBlank?.topLevel]);
 
   // The site's own policy on scripts still applies, and lets ours in.
   wait = next((d) => d.t === "csp", "a page with a script policy");

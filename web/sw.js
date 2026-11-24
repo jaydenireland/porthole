@@ -105,6 +105,21 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(proxy(event.request, event.clientId, event.resultingClientId));
 });
 
+// Whether the window with this id is a blank frame: one a page made without
+// loading anything into it (about:blank, or "srcdoc" content). It is part of
+// the page that made it, but has an id of its own and runs none of our
+// script, so the app has to be told what it is.
+const blankFrames = new Map();
+async function isBlankFrame(id) {
+  if (!id) return false;
+  if (!blankFrames.has(id)) {
+    const client = await self.clients.get(id).catch(() => undefined);
+    if (blankFrames.size >= 1000) blankFrames.clear();
+    blankFrames.set(id, client?.type === "window" && client.url.startsWith("about:"));
+  }
+  return blankFrames.get(id);
+}
+
 // client: the id of the page or worker asking, for requests that are not page
 // loads. becomes: the id of the page or worker the response will become.
 async function proxy(req, client, becomes) {
@@ -120,6 +135,7 @@ async function proxy(req, client, becomes) {
   if (referer) headers.push(["Referer", referer]);
 
   const from = askedBy(req, nav);
+  const blank = !nav && await isBlankFrame(client);
   // A page loaded into a tab of its own, not into a frame.
   const topLevel = req.destination === "document";
 
@@ -130,7 +146,7 @@ async function proxy(req, client, becomes) {
     if (method !== "GET" && method !== "HEAD") h.push(["Origin", from ?? "null"]);
     let res;
     try {
-      res = await nodeRequest({ url: cur.href, method, headers: h, body, from, topLevel }, nav, isDocument, client, becomes);
+      res = await nodeRequest({ url: cur.href, method, headers: h, body, from, topLevel }, nav, isDocument, client, becomes, blank);
     } catch (e) {
       return errorResponse(cur.href, e, nav);
     }
@@ -378,7 +394,7 @@ ${tellApp({ type: "tailnet-navigate", url })}`);
 // first the status and headers, then the body, which we pull chunk by chunk
 // (see streamBody in bridge.js) and expose as a ReadableStream in res.body.
 // doc: the response is an HTML document, so the app adds its cookies.
-async function nodeRequest(req, nav, doc, client, next) {
+async function nodeRequest(req, nav, doc, client, next, blank) {
   const relay = await findRelay();
   if (!relay) throw new Error("Open this site from Porthole.");
   return new Promise((resolve, reject) => {
@@ -407,7 +423,7 @@ async function nodeRequest(req, nav, doc, client, next) {
       });
       resolve(res);
     };
-    relay.postMessage({ type: "tailnet-request", req, nav, doc, client, next }, [channel.port2]);
+    relay.postMessage({ type: "tailnet-request", req, nav, doc, client, next, blank }, [channel.port2]);
   });
 }
 
