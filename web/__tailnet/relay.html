@@ -14,7 +14,7 @@ if (!upstream || parent === window) {
   document.body.textContent = "This page is part of Porthole and does nothing on its own.";
 } else {
   navigator.serviceWorker.addEventListener("message", (ev) => {
-    if (ev.data?.type === "tailnet-request") parent.postMessage(ev.data, appOrigin, [...ev.ports]);
+    if (ev.data?.type === "tailnet-request" || ev.data?.type === "tailnet-framed") parent.postMessage(ev.data, appOrigin, [...ev.ports]);
   });
   navigator.serviceWorker.startMessages();
   (async () => {

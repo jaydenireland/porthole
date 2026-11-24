@@ -446,6 +446,22 @@ const hashTarget = () => {
   try { return decodeURIComponent(raw); } catch { return raw; }
 };
 let pendingTarget = hashTarget();  // opened once the tab is connected
+// Who sent the tab to that address, in the form bridge.go() takes: undefined
+// for the user, the origin of the page whose link led here, or null when
+// nothing says. A link on another website can name any tailnet address, so
+// only what is plainly the user's doing counts as theirs: a reload, a step
+// through history, or a link on Porthole's own pages. A bookmark looks the
+// same as a link with its source hidden, and is treated like one: the page
+// opens, without the cookies a site keeps back from links (SameSite=Strict).
+let pendingFrom = (() => {
+  const how = performance.getEntriesByType?.("navigation")[0]?.type;
+  if (how === "reload" || how === "back_forward") return undefined;
+  if (!document.referrer) return null;
+  try {
+    const origin = new URL(document.referrer).origin;
+    return origin === location.origin ? undefined : origin;
+  } catch { return null; }
+})();
 
 // The tab's title is the title of the tailnet page being shown. Until the
 // page reports one, or if it has none, it is the page's host.
@@ -477,7 +493,7 @@ function setState(state) {
       if (pendingTarget) {
         const target = pendingTarget;
         pendingTarget = "";
-        queueMicrotask(() => navigate(target));
+        queueMicrotask(() => navigate(target, pendingFrom));
       }
       break;
     case "NeedsLogin":
@@ -689,7 +705,8 @@ function showHome() {
   refreshControls();
 }
 
-async function navigate(input) {
+// from: who asked, as bridge.go() takes it; left out when the user did.
+async function navigate(input, from) {
   if (!running) return;
   let url;
   try { url = parseAddress(input); } catch { notify("That doesn't look like an address. Try a device name, like nas, or nas:8080."); return; }
@@ -700,7 +717,7 @@ async function navigate(input) {
   setLoading(true);
   refreshControls();
   try {
-    await bridge.go(url);
+    await bridge.go(url, from);
   } catch (e) {
     showHome();
     notify(String(e?.message ?? e));
@@ -721,12 +738,13 @@ $("addressForm").addEventListener("submit", (ev) => {
 $("homeBtn").addEventListener("click", () => { rememberAddress(""); showHome(); });
 
 // The address after "#" changed without a reload: a bookmark opened in this
-// tab, or an edit in the browser's own address bar.
+// tab, or an edit in the browser's own address bar. Another page that holds
+// this window can do the same, so this does not count as the user's doing.
 addEventListener("hashchange", () => {
   const target = hashTarget();
-  if (!running) { pendingTarget = target; showPendingTarget(); return; }
+  if (!running) { pendingTarget = target; pendingFrom = null; showPendingTarget(); return; }
   if (!target) showHome();
-  else if (target !== visited[index]) navigate(target);
+  else if (target !== visited[index]) navigate(target, null);
 });
 $("back").addEventListener("click", () => step(-1));
 $("forward").addEventListener("click", () => step(1));

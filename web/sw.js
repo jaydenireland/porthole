@@ -22,6 +22,7 @@ const DROP_RESPONSE_HEADERS = new Set([
   // The node already decoded the body (and removed Content-Length if it did).
   "content-encoding", "transfer-encoding", "connection", "keep-alive",
   // These would stop the page rendering in the app's iframe on this origin.
+  // What they say about frames is applied by page.js instead (see framingOf).
   "content-security-policy", "content-security-policy-report-only", "x-frame-options",
   "cross-origin-opener-policy", "cross-origin-embedder-policy", "cross-origin-resource-policy",
   "strict-transport-security",
@@ -86,15 +87,23 @@ function askedBy(req, nav) {
   return origin;
 }
 
+// A page says it is inside a frame on another site's page (see page.js). The
+// app remembers that, so the page's requests go out as that site's doing.
+self.addEventListener("message", (event) => {
+  if (event.data?.type !== "tailnet-framed" || !event.source?.id) return;
+  event.waitUntil(findRelay().then((relay) => relay?.postMessage({ type: "tailnet-framed", client: event.source.id, by: event.data.by })));
+});
+
 self.addEventListener("fetch", (event) => {
   if (!UPSTREAM) return;  // not a site subdomain (e.g. the app's own origin)
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;       // third-party resources load directly
   if (url.pathname.startsWith("/__tailnet/")) return;    // our own helper files
-  event.respondWith(proxy(event.request));
+  event.respondWith(proxy(event.request, event.clientId));
 });
 
-async function proxy(req) {
+// client: the id of the page or worker asking, for requests that are not page loads.
+async function proxy(req, client) {
   const nav = req.mode === "navigate";
   let method = req.method;
   let body = method === "GET" || method === "HEAD" ? null : new Uint8Array(await req.arrayBuffer());
@@ -117,7 +126,7 @@ async function proxy(req) {
     if (method !== "GET" && method !== "HEAD") h.push(["Origin", from ?? "null"]);
     let res;
     try {
-      res = await nodeRequest({ url: cur.href, method, headers: h, body, from, topLevel }, nav, isDocument);
+      res = await nodeRequest({ url: cur.href, method, headers: h, body, from, topLevel }, nav, isDocument, client);
     } catch (e) {
       return errorResponse(cur.href, e, nav);
     }
@@ -176,19 +185,45 @@ async function toResponse(res, method, isDocument) {
   let body = res.body;
   if (isDocument && /^text\/html\b/i.test(headers.get("content-type") ?? "")) {
     const whole = new Uint8Array(await new Response(res.body).arrayBuffer());
-    body = injectPageScripts(whole, res.cookies);
+    body = injectPageScripts(whole, res.cookies, framingOf(res.headers));
     headers.delete("content-length");
   }
   return new Response(body, { status, statusText: res.statusText, headers });
 }
 
+// What a response says about being shown in frames: the source lists of
+// every Content-Security-Policy "frame-ancestors" and the X-Frame-Options
+// values, or null if it says nothing. The browser cannot apply either: both
+// headers are dropped so the app's frame can show the page, and the pages
+// are not at their real addresses. page.js applies them to any frame between
+// the page and the app.
+function framingOf(headers) {
+  const ancestors = [], options = [];
+  for (const [k, v] of headers) {
+    const name = k.toLowerCase();
+    if (name === "content-security-policy") {
+      for (const policy of v.split(",")) {
+        for (const directive of policy.split(";")) {
+          const [word, ...sources] = directive.trim().split(/\s+/);
+          if (word.toLowerCase() === "frame-ancestors") { ancestors.push(sources); break; }
+        }
+      }
+    } else if (name === "x-frame-options") {
+      options.push(...v.split(",").map((x) => x.trim().toUpperCase()).filter(Boolean));
+    }
+  }
+  return ancestors.length || options.length ? { ancestors, options } : null;
+}
+
 // Splices PAGE_SCRIPTS into the HTML bytes right after <head>, so they run
 // first without pushing the doctype out of place, along with the page's
-// starting document.cookie value. The search treats bytes as Latin-1
+// starting document.cookie value and what it says about frames. The search treats bytes as Latin-1
 // characters, which keeps offsets equal to byte positions.
-function injectPageScripts(body, cookies) {
-  const seed = typeof cookies === "string"
-    ? `<script>self.__tailnetCookies=${JSON.stringify(cookies).replace(/</g, "\\u003c")};<\/script>` : "";
+function injectPageScripts(body, cookies, framing) {
+  const values = [];
+  if (typeof cookies === "string") values.push(`self.__tailnetCookies=${JSON.stringify(cookies)};`);
+  if (framing) values.push(`self.__tailnetFraming=${JSON.stringify(framing)};`);
+  const seed = values.length ? `<script>${values.join("").replace(/</g, "\\u003c")}<\/script>` : "";
   const inject = new TextEncoder().encode(seed + PAGE_SCRIPTS);
   const start = new TextDecoder("latin1").decode(body.subarray(0, 65536));
   const m = /<head(\s[^>]*)?>/i.exec(start) ?? /<html(\s[^>]*)?>/i.exec(start) ?? /<!doctype[^>]*>/i.exec(start);
@@ -233,19 +268,8 @@ ${tellApp({ type: "tailnet-navigate", url })}`);
 // first the status and headers, then the body, which we pull chunk by chunk
 // (see streamBody in bridge.js) and expose as a ReadableStream in res.body.
 // doc: the response is an HTML document, so the app adds its cookies.
-async function nodeRequest(req, nav, doc) {
-  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-  // Every Porthole tab that has this site open has a relay here. Only the
-  // newest tab is active (see bridge.js), and its relay carries the highest
-  // number in "?i=". Some hosts redirect relay.html to its extensionless
-  // address, so both spellings are accepted.
-  let relay = null, newest = -1;
-  for (const client of windows) {
-    const url = new URL(client.url);
-    if (!/^\/__tailnet\/relay(\.html)?$/.test(url.pathname)) continue;
-    const i = Number(url.searchParams.get("i")) || 0;
-    if (i > newest) { newest = i; relay = client; }
-  }
+async function nodeRequest(req, nav, doc, client) {
+  const relay = await findRelay();
   if (!relay) throw new Error("Open this site from Porthole.");
   return new Promise((resolve, reject) => {
     const channel = new MessageChannel();
@@ -273,6 +297,23 @@ async function nodeRequest(req, nav, doc) {
       });
       resolve(res);
     };
-    relay.postMessage({ type: "tailnet-request", req, nav, doc }, [channel.port2]);
+    relay.postMessage({ type: "tailnet-request", req, nav, doc, client }, [channel.port2]);
   });
+}
+
+// The app's relay page on this origin, or null if Porthole is not open.
+async function findRelay() {
+  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  // Every Porthole tab that has this site open has a relay here. Only the
+  // newest tab is active (see bridge.js), and its relay carries the highest
+  // number in "?i=". Some hosts redirect relay.html to its extensionless
+  // address, so both spellings are accepted.
+  let relay = null, newest = -1;
+  for (const client of windows) {
+    const url = new URL(client.url);
+    if (!/^\/__tailnet\/relay(\.html)?$/.test(url.pathname)) continue;
+    const i = Number(url.searchParams.get("i")) || 0;
+    if (i > newest) { newest = i; relay = client; }
+  }
+  return relay;
 }

@@ -11,6 +11,12 @@
 // - The title: reported whenever it changes, so the app can show it as the
 //   tab's title.
 //
+// - Frames: a site's rules about which pages may show it in a frame
+//   (X-Frame-Options, Content-Security-Policy frame-ancestors) are applied
+//   here, because the service worker has to drop those headers. And a page
+//   framed by another site says so, so its requests go without the cookies
+//   that site should not be able to use.
+//
 // All of them talk to the app page (our top window).
 // Needs codec.js loaded first.
 (() => {
@@ -18,8 +24,86 @@
   const Native = globalThis.WebSocket;
   const initialCookies = globalThis.__tailnetCookies;
   delete globalThis.__tailnetCookies;
+  const framing = globalThis.__tailnetFraming;
+  delete globalThis.__tailnetFraming;
   if (!info?.upstream || !Native || window.top === window) return;
   const upstream = new URL(info.upstream);
+
+  // --- Frames ---------------------------------------------------------------
+  //
+  // The app's frame stands for the browser tab. Any page between this one
+  // and the app is a page that put this one in a frame, as it could on the
+  // real tailnet.
+
+  // The pages this one is framed in, nearest first, as the tailnet would
+  // name their origins; null for one that cannot be named. The app is left
+  // out. Where the browser does not list them (Firefox), only pages of this
+  // site can be named, and the top window is taken to be the app.
+  const framers = (() => {
+    const listed = location.ancestorOrigins ? [...location.ancestorOrigins] : null;
+    const name = (origin) => {
+      if (!origin || origin === "null") return null;
+      if (origin === location.origin) return upstream.origin;
+      try {
+        const u = new URL(origin);
+        const [label, ...rest] = u.host.split(".");
+        if (`${u.protocol}//${rest.join(".")}` === info.appOrigin) return TailnetCodec.decodeLabel(label) ?? origin;
+      } catch { /* not an address */ }
+      return origin;
+    };
+    const out = [];
+    for (let w = window, i = 0; w !== w.parent; i++) {
+      w = w.parent;
+      let origin = listed ? listed[i] : null;
+      if (!listed) { try { origin = w.location.origin; } catch { /* another site's page */ } }
+      if (w === window.top && (!listed || origin === info.appOrigin)) break;
+      out.push(name(origin));
+    }
+    return out;
+  })();
+
+  // Whether one "frame-ancestors" source allows a framing page.
+  const sourceAllows = (source, origin) => {
+    source = source.toLowerCase();
+    if (source === "'none'") return false;
+    if (source === "*") return true;
+    if (!origin) return false;
+    const page = new URL(origin);
+    if (source === "'self'") return page.origin === upstream.origin;
+    if (/^[a-z][a-z0-9+.-]*:$/.test(source)) return page.protocol === source || (source === "http:" && page.protocol === "https:");
+    const m = /^(?:([a-z][a-z0-9+.-]*):\/\/)?(\*|(?:\*\.)?[a-z0-9.-]+)(?::(\d+|\*))?(?:\/.*)?$/.exec(source);
+    if (!m) return false;
+    const [, scheme, host, port] = m;
+    if (scheme && scheme + ":" !== page.protocol && !(scheme === "http" && page.protocol === "https:")) return false;
+    if (host.startsWith("*.") ? !page.hostname.endsWith(host.slice(1)) : host !== "*" && host !== page.hostname) return false;
+    return port === "*" || (port ?? "") === page.port || (!page.port && port === (page.protocol === "https:" ? "443" : "80"));
+  };
+  // Whether the site's rules let every page in `framers` show this one.
+  // frame-ancestors replaces X-Frame-Options when both are sent.
+  const mayBeFramed = () => {
+    if (!framing || !framers.length) return true;
+    if (framing.ancestors?.length) {
+      return framing.ancestors.every((sources) => framers.every((origin) => sources.some((source) => sourceAllows(String(source), origin))));
+    }
+    if (framing.options.includes("DENY")) return false;
+    if (framing.options.includes("SAMEORIGIN")) return framers.every((origin) => origin === upstream.origin);
+    return true;
+  };
+  if (!mayBeFramed()) {
+    // Stop the page here: nothing after this script is parsed or run.
+    window.stop();
+    const message = `${upstream.host} does not allow other pages to show it in a frame.`;
+    document.documentElement.replaceChildren(document.createElement("head"), Object.assign(document.createElement("body"), { textContent: message }));
+    top.postMessage({ type: "tailnet-error", url: upstream.origin + location.pathname, message }, info.appOrigin);
+    return;
+  }
+
+  // The first page of another site that this one is framed in: undefined if
+  // there is none, null if there is one that cannot be named. Requests from
+  // a page framed like that are the other site's doing as far as cookies go.
+  const framedBy = framers.find((origin) => origin !== upstream.origin);
+  const framed = framers.some((origin) => origin !== upstream.origin);
+  if (framed) navigator.serviceWorker?.controller?.postMessage({ type: "tailnet-framed", by: framedBy ?? null });
 
   // --- Address --------------------------------------------------------------
   //
@@ -70,7 +154,16 @@
   // a local copy: seeded by the service worker with the page, updated at once
   // on writes, and refreshed from the node whenever it says cookies changed.
   // HttpOnly cookies never leave the node.
-  {
+  //
+  // A page framed by another site gets no cookies and cannot set any.
+  if (framed) {
+    Object.defineProperty(Document.prototype, "cookie", {
+      configurable: true,
+      enumerable: true,
+      get() { return ""; },
+      set() {},
+    });
+  } else {
     const parse = (text) => {
       const map = new Map();
       for (const part of String(text).split("; ")) {
@@ -173,7 +266,7 @@
       this.#port.onmessage = (ev) => this.#receive(ev.data);
       live.add(this);
       top.postMessage(
-        { type: "tailnet-websocket", url: target, protocols: [].concat(protocols).map(String) },
+        { type: "tailnet-websocket", url: target, protocols: [].concat(protocols).map(String), ...(framed ? { from: framedBy ?? null } : {}) },
         info.appOrigin, [channel.port2]);
     }
 

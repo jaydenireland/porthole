@@ -326,7 +326,7 @@ pub async fn site(relay: &str) -> Result<(), Error> {
     }
 
     let address = Url::parse(&format!("ws://{NAME}:8080/")).expect("a fixed address");
-    let ((mut socket, _protocol), _) = site.websocket(&address, &[], &[]).await?;
+    let ((mut socket, _protocol), _) = site.websocket(&address, &[], &[], crate::cookies::Context::SameSite).await?;
     socket.send(Message::text("ping")).await.map_err(|e| Error::Network(e.to_string()))?;
     match socket.next().await {
         Some(Ok(message)) if message == Message::text("ping") => {}

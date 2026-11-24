@@ -131,6 +131,13 @@ async function fakeSites(req) {
   if (u.origin === "http://other.ts.net:8080" && u.pathname === "/frames") {
     return html(`<title>Frames</title><body><iframe referrerpolicy="no-referrer" src="${FAKE_SHOWN}/landed?from=frame"></iframe>`);
   }
+  // The same with pages of the fake site that do and do not allow it.
+  if (u.origin === "http://other.ts.net:8080" && u.pathname === "/frames-refused") {
+    return html(`<title>Frames</title><body><iframe src="${FAKE_SHOWN}/"></iframe>`);
+  }
+  if (u.origin === "http://other.ts.net:8080" && u.pathname === "/frames-allowed") {
+    return html(`<title>Frames</title><body><iframe src="${FAKE_SHOWN}/framed"></iframe>`);
+  }
   if (u.origin === "http://other.ts.net:8080") return html(`<title>Other</title><body>other site ${u.pathname}${REPORT}`);
   if (u.origin !== "http://fake.ts.net") return reply(404, [], "wrong origin " + u.origin);
   switch (u.pathname) {
@@ -178,6 +185,19 @@ history.pushState(null, "", "/spa/one?x=1");
 history.replaceState(null, "", "/spa/two");
 addEventListener("hashchange", () => top.postMessage({ t: "spa" }, "*"));
 location.hash = "part";
+<\/script>`);
+    // A page that lets the other site show it in a frame, and there asks
+    // for what a logged-in page would. The wait lets the app hear that the
+    // page is framed first.
+    case "/framed":
+      return reply(200, [["Content-Type", "text/html"], ["X-Frame-Options", "DENY"],
+        ["Content-Security-Policy", "default-src 'self'; frame-ancestors 'self' http://*.ts.net:8080"]],
+        `<title>Framed</title><body><script>
+setTimeout(async () => {
+  await fetch("/cookie-echo");
+  const ws = new WebSocket("ws://" + location.host + "/echo");
+  ws.onopen = () => { ws.close(); top.postMessage({ t: "framed", cookie: document.cookie }, "*"); };
+}, 300);
 <\/script>`);
     // A link to the site's own page that hides the referrer.
     case "/quiet":
@@ -378,6 +398,26 @@ async function run() {
   await wait;
   forged = seen.findLast((r) => r.url.endsWith("/landed?from=frame"));
   check("a frame on another site's page with the referrer hidden is not taken for the site's own", forged.from === null && forged.topLevel === false, [forged.from, forged.topLevel]);
+
+  // A site's rules about frames are applied to frames on other sites' pages.
+  let homes = 0;
+  const countHomes = (ev) => { if (ev.data?.t === "home") homes++; };
+  addEventListener("message", countHomes);
+  wait = next((d) => d.type === "tailnet-error", "a refused frame");
+  await bridge.go("http://other.ts.net:8080/frames-refused");
+  const refusal = await wait;
+  await new Promise((r) => setTimeout(r, 1500));
+  removeEventListener("message", countHomes);
+  check("a site that forbids frames is not shown in another site's frame", refusal.origin === SITE && refusal.message.includes("does not allow") && homes === 0, [refusal.message, homes]);
+
+  wait = next((d) => d.t === "framed", "a page another site may frame");
+  await bridge.go("http://other.ts.net:8080/frames-allowed");
+  const inFrame = await wait;
+  check("a site that allows the framing page is shown", inFrame.origin === SITE);
+  check("a framed page's requests are marked as the framing site's doing",
+    lastSeen("/cookie-echo").from === "http://other.ts.net:8080" && lastSeen("/cookie-echo").topLevel === false, [lastSeen("/cookie-echo").from, lastSeen("/cookie-echo").topLevel]);
+  check("a framed page's sockets are marked the same way", sockets.at(-1).from === "http://other.ts.net:8080", String(sockets.at(-1).from));
+  check("a framed page reads no cookies", inFrame.cookie === "", inFrame.cookie);
 
   wait = next((d) => d.t === "page" && d.path === "/landed?from=quiet", "page after a link with no referrer");
   await bridge.go("http://fake.ts.net/quiet");

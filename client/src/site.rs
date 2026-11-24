@@ -176,12 +176,14 @@ impl<D: Dialer> Site<D> {
     }
 
     /// Open a WebSocket, offering `protocols`. The site's cookies are sent,
-    /// so a login made over HTTP also covers the socket.
+    /// so a login made over HTTP also covers the socket; `context` decides
+    /// which, as for a request.
     pub async fn websocket(
         &self,
         url: &Url,
         protocols: &[String],
         headers: &[(String, String)],
+        context: Context,
     ) -> Result<(Socket, bool), Error> {
         let invalid = |what: &str| {
             Error::WebSocket(tungstenite::Error::Url(
@@ -210,7 +212,7 @@ impl<D: Dialer> Site<D> {
                 .map_err(|_| invalid("a subprotocol"))?;
             fields.insert("sec-websocket-protocol", offered);
         }
-        if let Some(cookies) = self.jar.borrow().header_for(&as_http(url)) {
+        if let Some(cookies) = self.jar.borrow().header_in(&as_http(url), context) {
             fields.insert("cookie", HeaderValue::from_str(&cookies).map_err(|_| invalid("cookies"))?);
         }
 
@@ -411,7 +413,7 @@ mod tests {
 
             let url = Url::parse(&format!("ws://{HOST}:8080/socket")).unwrap();
             let ((mut socket, protocol), changed) = site
-                .websocket(&url, &["chat".to_owned(), "other".to_owned()], &[("Origin".to_owned(), format!("http://{HOST}"))])
+                .websocket(&url, &["chat".to_owned(), "other".to_owned()], &[("Origin".to_owned(), format!("http://{HOST}"))], Context::SameSite)
                 .await
                 .unwrap();
             assert_eq!(protocol.as_deref(), Some("chat"));

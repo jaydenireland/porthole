@@ -28,7 +28,8 @@ export async function removeAppWorker() {
 //              another website's origin, or null if unknown) and topLevel says it
 //              loads a page as a tab would; the node uses both to decide which
 //              SameSite cookies to send.
-// websocket:   ({url, protocols, headers, onOpen, onMessage, onClose, onError}) => {send, close}
+//              A socket has from too, when its page is framed by another site.
+// websocket:   ({url, protocols, headers, from, onOpen, onMessage, onClose, onError}) => {send, close}
 // cookies:     { get(url) => string, set(url, text) }: what document.cookie reads and writes
 // onNavigated: (tailnetUrl, how) => void. how is "load" after a page navigation
 //              got a final response (the address then has no "#" part), or what
@@ -44,7 +45,10 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
   const relays = new Map();  // site origin -> { el, upstreamOrigin, pages, ready, resolve, reject }
   let current = "";  // the address the frame's page last reported; "" while one loads
   let shown = null;  // the relay of the site in the frame
-  let asked = null;  // { relay, from }: a page of another site sent the frame to this one
+  let asked = null;  // { relay, from }: someone other than the user sent the frame to this site
+  // Pages that said they are in a frame on another site's page (see page.js):
+  // the service worker's id for the page -> that site's origin, or null.
+  const framed = new Map();
 
   // Only one tab browses at a time. A site's service worker is shared by
   // every tab and cannot tell which tab a request came from, so two active
@@ -92,15 +96,16 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
     return relay.ready.then(() => site);
   }
 
-  // Show a tailnet URL in the frame. from is the tailnet origin of the page
-  // that asked, when a page did and not the user.
+  // Show a tailnet URL in the frame. Leave from out when the user asked.
+  // Otherwise it is the origin of the page that did, or null if all that is
+  // known is that the user did not: a link followed from somewhere else.
   async function go(input, from) {
     if (!active) throw new Error("Porthole is open in another tab.");
     const upstream = typeof input === "string" ? parseAddress(input) : input;
     const site = await relayFor(upstream);
     if (!active) throw new Error("Porthole is open in another tab.");
     shown = relays.get(site);
-    asked = from ? { relay: shown, from } : null;
+    asked = from !== undefined ? { relay: shown, from } : null;
     // Setting the frame to the address it is already on, "#" part included,
     // would not load anything, so ask the page to reload itself.
     if (upstream.hash && upstream.href === current) frame.contentWindow.postMessage({ type: "tailnet-reload" }, site);
@@ -123,6 +128,10 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
         // frame that another site's page put this site in does not get here:
         // the site in our frame is then the other one.
         req.from = relay.upstreamOrigin;
+      } else if (!data.nav && framed.has(data.client)) {
+        // Asked for by a page that another site's page shows in a frame.
+        req.from = framed.get(data.client);
+        req.topLevel = false;
       }
       const r = await request(req);
       const res = { status: r.status, statusText: r.statusText, url: r.url, headers: r.headers };
@@ -214,6 +223,8 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
         url: target.href,
         protocols: Array.isArray(data.protocols) ? data.protocols.map(String) : [],
         headers: [["Origin", relay.upstreamOrigin], ["User-Agent", navigator.userAgent]],
+        // Only a page framed by another site sends this.
+        ...("from" in data ? { from: typeof data.from === "string" ? data.from : null } : {}),
         onOpen: (protocol) => port.postMessage({ t: "open", protocol }),
         onMessage: (d) => port.postMessage({ t: "message", data: d }, typeof d === "string" ? [] : [d.buffer]),
         onError: (message) => { onError?.(`websocket ${target.href}: ${message}`); port.postMessage({ t: "error" }); },
@@ -240,6 +251,10 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
       if (data.type === "tailnet-relay-ready") relay.resolve();
       else if (data.type === "tailnet-relay-failed") relay.reject(new Error(String(data.error)));
       else if (data.type === "tailnet-request" && ev.ports[0]) serve(relay, data, ev.ports[0]);
+      else if (data.type === "tailnet-framed" && typeof data.client === "string") {
+        if (framed.size >= 1000) framed.delete(framed.keys().next().value);
+        framed.set(data.client, typeof data.by === "string" ? data.by : null);
+      }
     } else if (ev.source === frame.contentWindow) {
       // Sent by pages our service worker generates.
       if (data.type === "tailnet-navigate") go(String(data.url), relay.upstreamOrigin).catch((e) => onError?.(String(e?.message ?? e)));

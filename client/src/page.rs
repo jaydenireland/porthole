@@ -9,6 +9,7 @@
 //!   -> Promise<{ status, statusText, url, headers: [name, value][],
 //!                read(): Promise<Uint8Array | null>, cancel() }>
 //! websocket({ url, protocols?: string[], headers?: [name, value][],
+//!             from?: string | null,
 //!             onOpen(protocol), onMessage(string | Uint8Array),
 //!             onClose(code, reason, wasClean), onError(message) })
 //!   -> { send(string | Uint8Array): boolean, close(code?, reason?) }
@@ -192,14 +193,21 @@ impl Client {
     }
 
     /// Open a WebSocket to a tailnet site. `onClose` is always called exactly
-    /// once, last.
+    /// once, last. `from` is as for `request()`: the origin of the other
+    /// site's page this one is framed in, if it is.
     pub fn websocket(&self, options: JsValue) -> JsValue {
-        const USAGE: &str = "websocket({url, protocols?, headers?, onOpen, onMessage, onClose, onError})";
+        const USAGE: &str = "websocket({url, protocols?, headers?, from?, onOpen, onMessage, onClose, onError})";
+        let from = get(&options, "from");
         let (queue, queued) = mpsc::channel::<Outgoing>(SEND_QUEUE);
         let callbacks = Callbacks(options.clone());
         match url_of(&options, USAGE) {
             Ok(url) => spawn_local(run_socket(
                 self.inner.clone(),
+                if from.is_undefined() {
+                    Context::SameSite
+                } else {
+                    Context::of(from.as_string().as_deref(), &url, "GET", false)
+                },
                 url,
                 strings(&get(&options, "protocols")),
                 pairs(&get(&options, "headers")),
@@ -271,13 +279,14 @@ impl Callbacks {
 
 async fn run_socket(
     inner: Rc<Inner>,
+    context: Context,
     url: Url,
     protocols: Vec<String>,
     headers: Vec<(String, String)>,
     page: Callbacks,
     mut queued: mpsc::Receiver<Outgoing>,
 ) {
-    let mut socket = match inner.site.websocket(&url, &protocols, &headers).await {
+    let mut socket = match inner.site.websocket(&url, &protocols, &headers, context).await {
         Ok(((socket, protocol), _cookies_changed)) => {
             page.call("onOpen", &[protocol.unwrap_or_default().into()]);
             socket
