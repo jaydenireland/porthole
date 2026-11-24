@@ -31,10 +31,12 @@ export async function removeAppWorker() {
 //              the page then reported: "replace" with its full address once
 //              loaded, and "push", "replace" or "move" when it changes its own
 //              address without loading (history.pushState, a "#" link, back)
+// onTitle:     (title) => void, when the page in the frame gets or changes its
+//              title. A new page has none until it reports one.
 // onCookiesChanged: () => void, after a response or a page script changed a cookie
 // onError:     (message) => void
 // onSuperseded: () => void, when Porthole is opened in another tab and this one stops
-export function createBridge({ frame, request, websocket, cookies, onNavigated, onCookiesChanged, onError, onSuperseded }) {
+export function createBridge({ frame, request, websocket, cookies, onNavigated, onTitle, onCookiesChanged, onError, onSuperseded }) {
   const relays = new Map();  // site origin -> { el, upstreamOrigin, pages, ready, resolve, reject }
   let current = "";  // the address the frame's page last reported; "" while one loads
 
@@ -225,6 +227,8 @@ export function createBridge({ frame, request, websocket, cookies, onNavigated, 
         if (url.origin !== relay.upstreamOrigin) return;
         current = url.href;
         onNavigated?.(url.href, ["push", "replace", "move"].includes(data.how) ? data.how : "move");
+      } else if (data.type === "tailnet-title") {
+        onTitle?.(String(data.title ?? "").trim().slice(0, 300));
       }
     }
   });

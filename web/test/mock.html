@@ -16,6 +16,7 @@ const dec = (b) => new TextDecoder().decode(b ?? new Uint8Array());
 const seen = [];       // every request the fake sites received
 const sockets = [];    // every websocket the fake node was asked to open
 const navigated = [];  // every onNavigated callback
+const titles = [];  // every onTitle callback
 const navigatedHow = [];  // the same, with how each one happened
 const errors = [];     // every onError callback
 let pausedRelease = null;
@@ -265,6 +266,7 @@ async function run() {
     cookies: fakeCookies,
     onCookiesChanged: () => cookieChanges++,
     onNavigated: (url, how) => { navigated.push(url); navigatedHow.push(how + " " + url); },
+    onTitle: (title) => titles.push(title),
     onError: (m) => errors.push(m),
     onSuperseded: () => supersededCount++,
   });
@@ -317,6 +319,8 @@ async function run() {
   let page = await wait;
   check("link + redirect lands on the expected address", page.href === SITE + "/landed?from=redirect", page.href);
   check("only the final URL is reported", navigated.at(-1) === "http://fake.ts.net/landed?from=redirect" && !navigated.includes("http://fake.ts.net/redirect"), navigated);
+  for (let i = 0; i < 40 && titles.at(-1) !== "Landed"; i++) await new Promise((r) => setTimeout(r, 50));
+  check("the page's title is reported to the app", titles.includes("Fake home") && titles.at(-1) === "Landed", titles);
 
   // 3. Form POST answered with a 303 to an absolute URL on the same site.
   wait = next((d) => d.t === "page" && d.title === "Posted", "posted page");

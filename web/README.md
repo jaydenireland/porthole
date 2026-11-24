@@ -16,7 +16,7 @@ component.
 | `sw.js` | service worker that runs on each site's subdomain and serves its requests through the client. It must stay at the root. |
 | `__tailnet/codec.js` | maps a tailnet origin to a subdomain label and back. |
 | `__tailnet/relay.html` | hidden page on each site's subdomain; installs the worker there and passes its requests up to the app. |
-| `__tailnet/page.js` | added to every tailnet page by the worker; routes `WebSocket` and `document.cookie` through the client, and tells the app the page's address when a script or a `#` link changes it. |
+| `__tailnet/page.js` | added to every tailnet page by the worker; routes `WebSocket` and `document.cookie` through the client, and tells the app the page's title and its address when a script or a `#` link changes it. |
 | `app/client.js` | loads the Tailscale client and reports its progress to the app as a state. |
 | `client/` | the built client. Not in the repository; `../client/build.sh` writes it. |
 | `test/client/` | the same with logging and the test pages' checks. The app loads it when opened with `?debug`. |

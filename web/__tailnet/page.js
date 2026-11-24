@@ -8,6 +8,8 @@
 //
 // - The address: the app cannot read this frame's location, so the page
 //   reports it on load and whenever a script or a "#" link changes it.
+// - The title: reported whenever it changes, so the app can show it as the
+//   tab's title.
 //
 // All of them talk to the app page (our top window).
 // Needs codec.js loaded first.
@@ -39,6 +41,22 @@
     addEventListener("popstate", () => tell("move"));
     addEventListener("hashchange", () => tell("move"));
     tell("replace");
+
+    // The title, whenever it changes. This script runs before the page's own
+    // <title> is parsed, so the first report comes from the watcher.
+    let toldTitle = "";
+    const tellTitle = () => {
+      const title = document.title;
+      if (title === toldTitle) return;
+      toldTitle = title;
+      top.postMessage({ type: "tailnet-title", title }, info.appOrigin);
+    };
+    const watchTitle = () => {
+      if (!document.head) return;
+      new MutationObserver(tellTitle).observe(document.head, { childList: true, subtree: true, characterData: true });
+      tellTitle();
+    };
+    if (document.head) watchTitle(); else addEventListener("DOMContentLoaded", watchTitle);
     // The app reloads through us when setting the frame's address would only
     // scroll to the same "#" part.
     addEventListener("message", (ev) => {

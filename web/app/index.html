@@ -447,12 +447,20 @@ const hashTarget = () => {
 };
 let pendingTarget = hashTarget();  // opened once the tab is connected
 
+// The tab's title is the title of the tailnet page being shown. Until the
+// page reports one, or if it has none, it is the page's host.
+let pageTitle = "";
+let shownHost = "";
+function showTitle() {
+  document.title = shownHost ? pageTitle || shownHost + " | Porthole" : "Porthole";
+}
+
 function rememberAddress(url) {
   // Safari refuses more than 100 of these in 30 seconds.
   try { history.replaceState(null, "", url ? "#" + url : location.pathname + location.search); } catch {}
-  let host = "";
-  try { host = new URL(url).host; } catch {}
-  document.title = host ? host + " | Porthole" : "Porthole";
+  shownHost = "";
+  try { shownHost = new URL(url).host; } catch {}
+  showTitle();
 }
 let loginAsked = false;
 
@@ -638,6 +646,7 @@ const bridge = parked ? null : createBridge({
     set: (url, text) => { if (running) ipn.setCookie(url, text); },
   },
   onNavigated: (url, how) => {
+    if (how === "load") pageTitle = "";  // a new page; its title follows
     // A load is reported without its "#" part; the page adds it once it runs.
     if (how === "load" && visited[index]?.split("#")[0] === url) url = visited[index];
     if (url !== visited[index]) {
@@ -655,6 +664,7 @@ const bridge = parked ? null : createBridge({
     rememberAddress(url);
     refreshControls();
   },
+  onTitle: (title) => { pageTitle = title; showTitle(); },
   onCookiesChanged: saveCookiesSoon,
   onError: (message) => { setLoading(false); debug("error", message); },
   onSuperseded: () => {
